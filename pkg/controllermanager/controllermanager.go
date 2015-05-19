@@ -27,25 +27,30 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/cmd/kube-controller-manager/app"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/resource"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/record"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/clientcmd"
+	clientcmdapi "github.com/GoogleCloudPlatform/kubernetes/pkg/client/clientcmd/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider"
-	nodeControllerPkg "github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/controller"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/mesos"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/nodecontroller"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/servicecontroller"
 	replicationControllerPkg "github.com/GoogleCloudPlatform/kubernetes/pkg/controller"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/healthz"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/namespace"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/resourcequota"
 	kendpoint "github.com/GoogleCloudPlatform/kubernetes/pkg/service"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/serviceaccount"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
-	"github.com/golang/glog"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/volumeclaimbinder"
+	"github.com/GoogleCloudPlatform/kubernetes/plugin/contrib/mesos/pkg/profile"
 
-	"github.com/mesosphere/kubernetes-mesos/pkg/cloud/mesos"
-	"github.com/mesosphere/kubernetes-mesos/pkg/profile"
+	"github.com/golang/glog"
 	kmendpoint "github.com/mesosphere/kubernetes-mesos/pkg/service"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/pflag"
 )
 
@@ -92,33 +97,47 @@ func (s *CMServer) verifyMinionFlags() {
 
 func (s *CMServer) Run(_ []string) error {
 	s.verifyMinionFlags()
-	if len(s.ClientConfig.Host) == 0 {
-		glog.Fatal("usage: controller-manager --master <master>")
+
+	if s.Kubeconfig == "" && s.Master == "" {
+		glog.Warningf("Neither --kubeconfig nor --master was specified.  Using default API client.  This might not work.")
 	}
 
-	kubeClient, err := client.New(&s.ClientConfig)
+	// This creates a client, first loading any specified kubeconfig
+	// file, and then overriding the Master flag, if non-empty.
+	kubeconfig, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		&clientcmd.ClientConfigLoadingRules{ExplicitPath: s.Kubeconfig},
+		&clientcmd.ConfigOverrides{ClusterInfo: clientcmdapi.Cluster{Server: s.Master}}).ClientConfig()
+	if err != nil {
+		return err
+	}
+
+	kubeconfig.QPS = 20.0
+	kubeconfig.Burst = 30
+
+	kubeClient, err := client.New(kubeconfig)
 	if err != nil {
 		glog.Fatalf("Invalid API configuration: %v", err)
 	}
 
 	go func() {
 		mux := http.NewServeMux()
+		healthz.InstallHandler(mux)
 		if s.EnableProfiling {
 			profile.InstallHandler(mux)
 		}
-		util.Forever(func() { http.ListenAndServe(net.JoinHostPort(s.Address.String(), strconv.Itoa(s.Port)), mux) }, 5*time.Second)
+		mux.Handle("/metrics", prometheus.Handler())
+		server := &http.Server{
+			Addr:    net.JoinHostPort(s.Address.String(), strconv.Itoa(s.Port)),
+			Handler: mux,
+		}
+		glog.Fatal(server.ListenAndServe())
 	}()
 
 	endpoints := s.createEndpointController(kubeClient)
-	go util.Forever(func() { endpoints.SyncServiceEndpoints() }, time.Second*10)
+	go endpoints.Run(s.ConcurrentEndpointSyncs, util.NeverStop)
 
-	controllerManager := replicationControllerPkg.NewReplicationManager(kubeClient)
-	controllerManager.Run(replicationControllerPkg.DefaultSyncPeriod)
-
-	kubeletClient, err := client.NewKubeletClient(&s.KubeletConfig)
-	if err != nil {
-		glog.Fatalf("Failure to start kubelet client: %v", err)
-	}
+	controllerManager := replicationControllerPkg.NewReplicationManager(kubeClient, replicationControllerPkg.BurstReplicas)
+	go controllerManager.Run(s.ConcurrentRCSyncs, util.NeverStop)
 
 	//TODO(jdef) should eventually support more cloud providers here
 	if s.CloudProvider != mesos.PluginName {
@@ -134,16 +153,47 @@ func (s *CMServer) Run(_ []string) error {
 		},
 	}
 
-	nodeController := nodeControllerPkg.NewNodeController(cloud, s.MinionRegexp, s.MachineList, nodeResources,
-		kubeClient, kubeletClient, record.FromSource(api.EventSource{Component: "controllermanager"}),
-		s.RegisterRetryCount, s.PodEvictionTimeout)
-	nodeController.Run(s.NodeSyncPeriod, s.SyncNodeList, s.SyncNodeStatus)
+	if s.SyncNodeStatus {
+		glog.Warning("DEPRECATION NOTICE: sync-node-status flag is being deprecated. It has no effect now and it will be removed in a future version.")
+	}
+
+	nodeController := nodecontroller.NewNodeController(cloud, s.MinionRegexp, nil, nodeResources,
+		kubeClient, s.RegisterRetryCount, s.PodEvictionTimeout, util.NewTokenBucketRateLimiter(s.DeletingPodsQps, s.DeletingPodsBurst),
+		s.NodeMonitorGracePeriod, s.NodeStartupGracePeriod, s.NodeMonitorPeriod, (*net.IPNet)(&s.ClusterCIDR), s.AllocateNodeCIDRs)
+	nodeController.Run(s.NodeSyncPeriod, s.SyncNodeList)
+
+	serviceController := servicecontroller.New(cloud, kubeClient, s.ClusterName)
+	if err := serviceController.Run(s.NodeSyncPeriod); err != nil {
+		glog.Errorf("Failed to start service controller: %v", err)
+	}
 
 	resourceQuotaManager := resourcequota.NewResourceQuotaManager(kubeClient)
 	resourceQuotaManager.Run(s.ResourceQuotaSyncPeriod)
 
-	namespaceManager := namespace.NewNamespaceManager(kubeClient)
-	namespaceManager.Run(s.NamespaceSyncPeriod)
+	namespaceManager := namespace.NewNamespaceManager(kubeClient, s.NamespaceSyncPeriod)
+	namespaceManager.Run()
+
+	pvclaimBinder := volumeclaimbinder.NewPersistentVolumeClaimBinder(kubeClient, s.PVClaimBinderSyncPeriod)
+	pvclaimBinder.Run()
+
+	if len(s.ServiceAccountKeyFile) > 0 {
+		privateKey, err := serviceaccount.ReadPrivateKey(s.ServiceAccountKeyFile)
+		if err != nil {
+			glog.Errorf("Error reading key for service account token controller: %v", err)
+		} else {
+			serviceaccount.NewTokensController(
+				kubeClient,
+				serviceaccount.DefaultTokenControllerOptions(
+					serviceaccount.JWTTokenGenerator(privateKey),
+				),
+			).Run()
+		}
+	}
+
+	serviceaccount.NewServiceAccountsController(
+		kubeClient,
+		serviceaccount.DefaultServiceAccountsControllerOptions(),
+	).Run()
 
 	select {}
 }

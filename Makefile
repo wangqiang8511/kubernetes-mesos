@@ -9,10 +9,7 @@ fail		:= ${MAKE} --no-print-directory --quiet -f $(current_dir)/Makefile error
 KUBE_GO_PACKAGE	?= github.com/GoogleCloudPlatform/kubernetes
 K8SM_GO_PACKAGE	?= github.com/mesosphere/kubernetes-mesos
 
-K8S_CMD		:= \
-                   ${KUBE_GO_PACKAGE}/cmd/kubectl		\
-                   ${KUBE_GO_PACKAGE}/cmd/kube-apiserver	\
-                   ${KUBE_GO_PACKAGE}/cmd/kube-proxy
+K8S_CMD		:= ${KUBE_GO_PACKAGE}/cmd/kubectl
 
 CMD_DIRS := $(shell cd $(current_dir) && find ./cmd -type f -name '*.go'|sort|while read f; do echo -E "$$(dirname "$$f")"; done|sort|uniq|sed -e 's~^[^/]*/~~g')
 

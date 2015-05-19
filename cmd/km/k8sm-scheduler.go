@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/mesosphere/kubernetes-mesos/pkg/scheduler/service"
+	"github.com/GoogleCloudPlatform/kubernetes/plugin/contrib/mesos/pkg/scheduler/service"
 )
 
 // NewScheduler creates a new hyperkube Server object that includes the
