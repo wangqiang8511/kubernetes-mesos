@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -57,7 +57,7 @@ func (resourcequotaStrategy) PrepareForUpdate(obj, old runtime.Object) {
 }
 
 // Validate validates a new resourcequota.
-func (resourcequotaStrategy) Validate(obj runtime.Object) fielderrors.ValidationErrorList {
+func (resourcequotaStrategy) Validate(ctx api.Context, obj runtime.Object) fielderrors.ValidationErrorList {
 	resourcequota := obj.(*api.ResourceQuota)
 	return validation.ValidateResourceQuota(resourcequota)
 }
@@ -68,8 +68,9 @@ func (resourcequotaStrategy) AllowCreateOnUpdate() bool {
 }
 
 // ValidateUpdate is the default update validation for an end user.
-func (resourcequotaStrategy) ValidateUpdate(obj, old runtime.Object) fielderrors.ValidationErrorList {
-	return validation.ValidateResourceQuotaUpdate(obj.(*api.ResourceQuota), old.(*api.ResourceQuota))
+func (resourcequotaStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
+	errorList := validation.ValidateResourceQuota(obj.(*api.ResourceQuota))
+	return append(errorList, validation.ValidateResourceQuotaUpdate(obj.(*api.ResourceQuota), old.(*api.ResourceQuota))...)
 }
 
 type resourcequotaStatusStrategy struct {
@@ -84,7 +85,7 @@ func (resourcequotaStatusStrategy) PrepareForUpdate(obj, old runtime.Object) {
 	newResourcequota.Spec = oldResourcequota.Spec
 }
 
-func (resourcequotaStatusStrategy) ValidateUpdate(obj, old runtime.Object) fielderrors.ValidationErrorList {
+func (resourcequotaStatusStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
 	return validation.ValidateResourceQuotaStatusUpdate(obj.(*api.ResourceQuota), old.(*api.ResourceQuota))
 }
 

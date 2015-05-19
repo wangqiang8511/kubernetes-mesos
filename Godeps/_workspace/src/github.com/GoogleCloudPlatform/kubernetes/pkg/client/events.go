@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -104,8 +104,8 @@ func (e *events) List(label labels.Selector, field fields.Selector) (*api.EventL
 	err := e.client.Get().
 		NamespaceIfScoped(e.namespace, len(e.namespace) > 0).
 		Resource("events").
-		LabelsSelectorParam(api.LabelSelectorQueryParam(e.client.APIVersion()), label).
-		FieldsSelectorParam(api.FieldSelectorQueryParam(e.client.APIVersion()), field).
+		LabelsSelectorParam(label).
+		FieldsSelectorParam(field).
 		Do().
 		Into(result)
 	return result, err
@@ -130,8 +130,8 @@ func (e *events) Watch(label labels.Selector, field fields.Selector, resourceVer
 		NamespaceIfScoped(e.namespace, len(e.namespace) > 0).
 		Resource("events").
 		Param("resourceVersion", resourceVersion).
-		LabelsSelectorParam(api.LabelSelectorQueryParam(e.client.APIVersion()), label).
-		FieldsSelectorParam(api.FieldSelectorQueryParam(e.client.APIVersion()), field).
+		LabelsSelectorParam(label).
+		FieldsSelectorParam(field).
 		Watch()
 }
 

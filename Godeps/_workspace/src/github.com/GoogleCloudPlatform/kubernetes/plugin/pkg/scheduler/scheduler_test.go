@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,14 +18,18 @@ package scheduler
 
 import (
 	"errors"
+	"math/rand"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/testapi"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/cache"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/record"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/scheduler"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
+	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler/algorithm"
+	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler/algorithm/predicates"
 )
 
 type fakeBinder struct {
@@ -40,10 +44,15 @@ func podWithID(id, desiredHost string) *api.Pod {
 		Spec: api.PodSpec{
 			Host: desiredHost,
 		},
-		Status: api.PodStatus{
-			Host: desiredHost,
-		},
 	}
+}
+
+func podWithPort(id, desiredHost string, port int) *api.Pod {
+	pod := podWithID(id, desiredHost)
+	pod.Spec.Containers = []api.Container{
+		{Name: "ctr", Ports: []api.ContainerPort{{HostPort: port}}},
+	}
+	return pod
 }
 
 type mockScheduler struct {
@@ -51,19 +60,20 @@ type mockScheduler struct {
 	err     error
 }
 
-func (es mockScheduler) Schedule(pod api.Pod, ml scheduler.MinionLister) (string, error) {
+func (es mockScheduler) Schedule(pod *api.Pod, ml algorithm.MinionLister) (string, error) {
 	return es.machine, es.err
 }
 
 func TestScheduler(t *testing.T) {
-	defer record.StartLogging(t.Logf).Stop()
+	eventBroadcaster := record.NewBroadcaster()
+	defer eventBroadcaster.StartLogging(t.Logf).Stop()
 	errS := errors.New("scheduler")
 	errB := errors.New("binder")
 
 	table := []struct {
 		injectBindError  error
 		sendPod          *api.Pod
-		algo             scheduler.Scheduler
+		algo             algorithm.ScheduleAlgorithm
 		expectErrorPod   *api.Pod
 		expectAssumedPod *api.Pod
 		expectError      error
@@ -103,8 +113,13 @@ func TestScheduler(t *testing.T) {
 				AssumePodFunc: func(pod *api.Pod) {
 					gotAssumedPod = pod
 				},
+				ForgetPodFunc: func(pod *api.Pod) {
+					if gotAssumedPod != nil && gotAssumedPod.Name == pod.Name && gotAssumedPod.Namespace == pod.Namespace {
+						gotAssumedPod = nil
+					}
+				},
 			},
-			MinionLister: scheduler.FakeMinionLister(
+			MinionLister: algorithm.FakeMinionLister(
 				api.NodeList{Items: []api.Node{{ObjectMeta: api.ObjectMeta{Name: "machine1"}}}},
 			),
 			Algorithm: item.algo,
@@ -119,17 +134,17 @@ func TestScheduler(t *testing.T) {
 			NextPod: func() *api.Pod {
 				return item.sendPod
 			},
-			Recorder: record.FromSource(api.EventSource{Component: "scheduler"}),
+			Recorder: eventBroadcaster.NewRecorder(api.EventSource{Component: "scheduler"}),
 		}
 		s := New(c)
 		called := make(chan struct{})
-		events := record.GetEvents(func(e *api.Event) {
+		events := eventBroadcaster.StartEventWatcher(func(e *api.Event) {
 			if e, a := item.eventReason, e.Reason; e != a {
 				t.Errorf("%v: expected %v, got %v", i, e, a)
 			}
 			close(called)
 		})
-		s.scheduleOne()
+		s.schedule()()
 		if e, a := item.expectAssumedPod, gotAssumedPod; !reflect.DeepEqual(e, a) {
 			t.Errorf("%v: assumed pod: wanted %v, got %v", i, e, a)
 		}
@@ -145,4 +160,143 @@ func TestScheduler(t *testing.T) {
 		<-called
 		events.Stop()
 	}
+}
+
+func TestSchedulerForgetAssumedPodAfterDelete(t *testing.T) {
+	eventBroadcaster := record.NewBroadcaster()
+	defer eventBroadcaster.StartLogging(t.Logf).Stop()
+
+	// Setup modeler so we control the contents of all 3 stores: assumed,
+	// scheduled and queued
+	scheduledPodStore := cache.NewStore(cache.MetaNamespaceKeyFunc)
+	scheduledPodLister := &cache.StoreToPodLister{scheduledPodStore}
+
+	queuedPodStore := cache.NewFIFO(cache.MetaNamespaceKeyFunc)
+	queuedPodLister := &cache.StoreToPodLister{queuedPodStore}
+
+	modeler := NewSimpleModeler(queuedPodLister, scheduledPodLister)
+
+	// Create a fake clock used to timestamp entries and calculate ttl. Nothing
+	// will expire till we flip to something older than the ttl, at which point
+	// all entries inserted with fakeTime will expire.
+	ttl := 30 * time.Second
+	fakeTime := time.Date(2009, time.November, 10, 23, 0, 0, 0, time.UTC)
+	fakeClock := &util.FakeClock{fakeTime}
+	ttlPolicy := &cache.TTLPolicy{ttl, fakeClock}
+	assumedPodsStore := cache.NewFakeExpirationStore(
+		cache.MetaNamespaceKeyFunc, nil, ttlPolicy, fakeClock)
+	modeler.assumedPods = &cache.StoreToPodLister{assumedPodsStore}
+
+	// Port is the easiest way to cause a fit predicate failure
+	podPort := 8080
+	firstPod := podWithPort("foo", "", podPort)
+
+	// Create the scheduler config
+	algo := NewGenericScheduler(
+		map[string]algorithm.FitPredicate{"PodFitsPorts": predicates.PodFitsPorts},
+		[]algorithm.PriorityConfig{},
+		modeler.PodLister(),
+		rand.New(rand.NewSource(time.Now().UnixNano())))
+
+	var gotBinding *api.Binding
+	c := &Config{
+		Modeler: modeler,
+		MinionLister: algorithm.FakeMinionLister(
+			api.NodeList{Items: []api.Node{{ObjectMeta: api.ObjectMeta{Name: "machine1"}}}},
+		),
+		Algorithm: algo,
+		Binder: fakeBinder{func(b *api.Binding) error {
+			scheduledPodStore.Add(podWithPort(b.Name, b.Target.Name, podPort))
+			gotBinding = b
+			return nil
+		}},
+		NextPod: func() *api.Pod {
+			return queuedPodStore.Pop().(*api.Pod)
+		},
+		Error: func(p *api.Pod, err error) {
+			t.Errorf("Unexpected error when scheduling pod %+v: %v", p, err)
+		},
+		Recorder: eventBroadcaster.NewRecorder(api.EventSource{Component: "scheduler"}),
+	}
+
+	// First scheduling pass should schedule the pod
+	s := New(c)
+	called := make(chan struct{})
+	events := eventBroadcaster.StartEventWatcher(func(e *api.Event) {
+		if e, a := "scheduled", e.Reason; e != a {
+			t.Errorf("expected %v, got %v", e, a)
+		}
+		close(called)
+	})
+
+	queuedPodStore.Add(firstPod)
+	// queuedPodStore: [foo:8080]
+	// scheduledPodStore: []
+	// assumedPods: []
+
+	s.schedule()()
+	// queuedPodStore: []
+	// scheduledPodStore: [foo:8080]
+	// assumedPods: [foo:8080]
+
+	pod, exists, _ := scheduledPodStore.GetByKey("foo")
+	if !exists {
+		t.Errorf("Expected scheduled pod store to contain pod")
+	}
+	pod, exists, _ = queuedPodStore.GetByKey("foo")
+	if exists {
+		t.Errorf("Did not expect a queued pod, found %+v", pod)
+	}
+	pod, exists, _ = assumedPodsStore.GetByKey("foo")
+	if !exists {
+		t.Errorf("Assumed pod store should contain stale pod")
+	}
+
+	expectBind := &api.Binding{
+		ObjectMeta: api.ObjectMeta{Name: "foo"},
+		Target:     api.ObjectReference{Kind: "Node", Name: "machine1"},
+	}
+	if ex, ac := expectBind, gotBinding; !reflect.DeepEqual(ex, ac) {
+		t.Errorf("Expected exact match on binding: %s", util.ObjectDiff(ex, ac))
+	}
+
+	<-called
+	events.Stop()
+
+	scheduledPodStore.Delete(pod)
+	_, exists, _ = assumedPodsStore.Get(pod)
+	if !exists {
+		t.Errorf("Expected pod %#v in assumed pod store", pod)
+	}
+
+	secondPod := podWithPort("bar", "", podPort)
+	queuedPodStore.Add(secondPod)
+	// queuedPodStore: [bar:8080]
+	// scheduledPodStore: []
+	// assumedPods: [foo:8080]
+
+	// Second scheduling pass will fail to schedule if the store hasn't expired
+	// the deleted pod. This would normally happen with a timeout.
+	//expirationPolicy.NeverExpire = util.NewStringSet()
+	fakeClock.Time = fakeClock.Time.Add(ttl + 1)
+
+	called = make(chan struct{})
+	events = eventBroadcaster.StartEventWatcher(func(e *api.Event) {
+		if e, a := "scheduled", e.Reason; e != a {
+			t.Errorf("expected %v, got %v", e, a)
+		}
+		close(called)
+	})
+
+	s.schedule()()
+
+	expectBind = &api.Binding{
+		ObjectMeta: api.ObjectMeta{Name: "bar"},
+		Target:     api.ObjectReference{Kind: "Node", Name: "machine1"},
+	}
+	if ex, ac := expectBind, gotBinding; !reflect.DeepEqual(ex, ac) {
+		t.Errorf("Expected exact match on binding: %s", util.ObjectDiff(ex, ac))
+	}
+	<-called
+	events.Stop()
 }

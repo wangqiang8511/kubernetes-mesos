@@ -20,55 +20,15 @@ type Service struct {
 	Port     int    `json:"port,omitempty"`
 	Priority int    `json:"priority,omitempty"`
 	Weight   int    `json:"weight,omitempty"`
-	Text     string `json:"text,omitempty"`
-	Mail     bool   `json:"mail,omitempty"` // Be an MX record. Priority becomes Preference.
 	Ttl      uint32 `json:"ttl,omitempty"`
-
-	// When a SRV record with a "Host: IP-address" is added, we synthesize
-	// a srv.Target domain name.  Normally we convert the full Key where
-	// the record lives to a DNS name and use this as the srv.Target.  When
-	// TargetStrip > 0 we strip the left most TargetStrip labels from the
-	// DNS name.
-	TargetStrip int `json:"targetstrip",omitempty"`
-
-	// Etcd key where we found this service and ignored from json un-/marshalling
+	// etcd key where we found this service and ignore from json un-/marshalling
 	Key string `json:"-"`
 }
 
 // NewSRV returns a new SRV record based on the Service.
 func (s *Service) NewSRV(name string, weight uint16) *dns.SRV {
-	host := dns.Fqdn(s.Host)
-
-	offset, end := 0, false
-	for i := 0; i < s.TargetStrip; i++ {
-		offset, end = dns.NextLabel(host, offset)
-	}
-	if end {
-		// We overshot the name, use the orignal one.
-		offset = 0
-	}
-	host = host[offset:]
-
 	return &dns.SRV{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeSRV, Class: dns.ClassINET, Ttl: s.Ttl},
-		Priority: uint16(s.Priority), Weight: weight, Port: uint16(s.Port), Target: host}
-}
-
-// NewMX returns a new MX record based on the Service.
-func (s *Service) NewMX(name string) *dns.MX {
-	host := dns.Fqdn(s.Host)
-
-	offset, end := 0, false
-	for i := 0; i < s.TargetStrip; i++ {
-		offset, end = dns.NextLabel(host, offset)
-	}
-	if end {
-		// We overshot the name, use the orignal one.
-		offset = 0
-	}
-	host = host[offset:]
-
-	return &dns.MX{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeMX, Class: dns.ClassINET, Ttl: s.Ttl},
-		Preference: uint16(s.Priority), Mx: host}
+		Priority: uint16(s.Priority), Weight: weight, Port: uint16(s.Port), Target: dns.Fqdn(s.Host)}
 }
 
 // NewA returns a new A record based on the Service.
@@ -89,11 +49,6 @@ func (s *Service) NewCNAME(name string, target string) *dns.CNAME {
 // NewNS returns a new NS record based on the Service.
 func (s *Service) NewNS(name string, target string) *dns.NS {
 	return &dns.NS{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: s.Ttl}, Ns: target}
-}
-
-// NewTXT returns a new TXT record based on the Service.
-func (s *Service) NewTXT(name string) *dns.TXT {
-	return &dns.TXT{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: s.Ttl}, Txt: split255(s.Text)}
 }
 
 // NewPTR returns a new PTR record based on the Service.
@@ -137,25 +92,4 @@ func Domain(s string) string {
 		l[i], l[j] = l[j], l[i]
 	}
 	return dns.Fqdn(strings.Join(l[1:len(l)-1], "."))
-}
-
-// Split255 splits a string into 255 byte chunks.
-func split255(s string) []string {
-	if len(s) < 255 {
-		return []string{s}
-	}
-	sx := []string{}
-	p, i := 0, 255
-	for {
-		if i <= len(s) {
-			sx = append(sx, s[p:i])
-		} else {
-			sx = append(sx, s[p:])
-			break
-
-		}
-		p, i = p+255, i+255
-	}
-
-	return sx
 }

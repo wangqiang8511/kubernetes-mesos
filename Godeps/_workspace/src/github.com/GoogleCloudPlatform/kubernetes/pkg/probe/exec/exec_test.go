@@ -1,5 +1,5 @@
 /*
-Copyright 2015 Google Inc. All rights reserved.
+Copyright 2015 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -41,16 +41,40 @@ type healthCheckTest struct {
 	err            error
 }
 
+type fakeExitError struct {
+	exited     bool
+	statusCode int
+}
+
+func (f *fakeExitError) String() string {
+	return f.Error()
+}
+
+func (f *fakeExitError) Error() string {
+	return "fake exit"
+}
+
+func (f *fakeExitError) Exited() bool {
+	return f.exited
+}
+
+func (f *fakeExitError) ExitStatus() int {
+	return f.statusCode
+}
+
 func TestExec(t *testing.T) {
 	prober := New()
 	fake := FakeCmd{}
+
 	tests := []healthCheckTest{
 		// Ok
 		{probe.Success, false, []byte("OK"), nil},
+		// Ok
+		{probe.Success, false, []byte("OK"), &fakeExitError{true, 0}},
 		// Run returns error
 		{probe.Unknown, true, []byte("OK, NOT"), fmt.Errorf("test error")},
 		// Unhealthy
-		{probe.Failure, false, []byte("Fail"), nil},
+		{probe.Failure, false, []byte("Fail"), &fakeExitError{true, 1}},
 	}
 	for _, test := range tests {
 		fake.out = test.output

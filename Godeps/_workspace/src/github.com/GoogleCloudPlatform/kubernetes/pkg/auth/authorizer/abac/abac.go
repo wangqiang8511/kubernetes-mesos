@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -78,9 +78,9 @@ func NewFromFile(path string) (policyList, error) {
 
 	scanner := bufio.NewScanner(file)
 	pl := make(policyList, 0)
-	var p policy
 
 	for scanner.Scan() {
+		var p policy
 		b := scanner.Bytes()
 		// TODO: skip comment lines.
 		err = json.Unmarshal(b, &p)

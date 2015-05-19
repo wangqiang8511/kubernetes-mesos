@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -48,6 +48,12 @@ type Attributes interface {
 // authorized, otherwise it returns an error.
 type Authorizer interface {
 	Authorize(a Attributes) (err error)
+}
+
+type AuthorizerFunc func(a Attributes) error
+
+func (f AuthorizerFunc) Authorize(a Attributes) error {
+	return f(a)
 }
 
 // AttributesRecord implements Attributes interface.

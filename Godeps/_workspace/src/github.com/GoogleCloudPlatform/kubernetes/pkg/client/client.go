@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@ import (
 // an interface to allow mock testing.
 type Interface interface {
 	PodsNamespacer
+	PodTemplatesNamespacer
 	ReplicationControllersNamespacer
 	ServicesNamespacer
 	EndpointsNamespacer
@@ -39,8 +40,12 @@ type Interface interface {
 	EventNamespacer
 	LimitRangesNamespacer
 	ResourceQuotasNamespacer
+	ServiceAccountsNamespacer
 	SecretsNamespacer
 	NamespacesInterface
+	PersistentVolumesInterface
+	PersistentVolumeClaimsNamespacer
+	ComponentStatusesInterface
 }
 
 func (c *Client) ReplicationControllers(namespace string) ReplicationControllerInterface {
@@ -63,10 +68,13 @@ func (c *Client) Pods(namespace string) PodInterface {
 	return newPods(c, namespace)
 }
 
+func (c *Client) PodTemplates(namespace string) PodTemplateInterface {
+	return newPodTemplates(c, namespace)
+}
+
 func (c *Client) Services(namespace string) ServiceInterface {
 	return newServices(c, namespace)
 }
-
 func (c *Client) LimitRanges(namespace string) LimitRangeInterface {
 	return newLimitRanges(c, namespace)
 }
@@ -75,12 +83,28 @@ func (c *Client) ResourceQuotas(namespace string) ResourceQuotaInterface {
 	return newResourceQuotas(c, namespace)
 }
 
+func (c *Client) ServiceAccounts(namespace string) ServiceAccountsInterface {
+	return newServiceAccounts(c, namespace)
+}
+
 func (c *Client) Secrets(namespace string) SecretsInterface {
 	return newSecrets(c, namespace)
 }
 
 func (c *Client) Namespaces() NamespaceInterface {
 	return newNamespaces(c)
+}
+
+func (c *Client) PersistentVolumes() PersistentVolumeInterface {
+	return newPersistentVolumes(c)
+}
+
+func (c *Client) PersistentVolumeClaims(namespace string) PersistentVolumeClaimInterface {
+	return newPersistentVolumeClaims(c, namespace)
+}
+
+func (c *Client) ComponentStatuses() ComponentStatusInterface {
+	return newComponentStatuses(c)
 }
 
 // VersionInterface has a method to retrieve the server version.
@@ -126,6 +150,25 @@ func (c *Client) ServerAPIVersions() (*api.APIVersions, error) {
 		return nil, fmt.Errorf("got '%s': %v", string(body), err)
 	}
 	return &v, nil
+}
+
+type ComponentValidatorInterface interface {
+	ValidateComponents() (*api.ComponentStatusList, error)
+}
+
+// ValidateComponents retrieves and parses the master's self-monitored cluster state.
+// TODO: This should hit the versioned endpoint when that is implemented.
+func (c *Client) ValidateComponents() (*api.ComponentStatusList, error) {
+	body, err := c.Get().AbsPath("/validate").DoRaw()
+	if err != nil {
+		return nil, err
+	}
+
+	statuses := []api.ComponentStatus{}
+	if err := json.Unmarshal(body, &statuses); err != nil {
+		return nil, fmt.Errorf("got '%s': %v", string(body), err)
+	}
+	return &api.ComponentStatusList{Items: statuses}, nil
 }
 
 // IsTimeout tests if this is a timeout error in the underlying transport.

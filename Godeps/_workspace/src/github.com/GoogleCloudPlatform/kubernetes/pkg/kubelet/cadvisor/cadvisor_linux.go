@@ -1,7 +1,7 @@
 // +build cgo,linux
 
 /*
-Copyright 2015 Google Inc. All rights reserved.
+Copyright 2015 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/golang/glog"
+	"github.com/google/cadvisor/events"
 	cadvisorFs "github.com/google/cadvisor/fs"
 	cadvisorHttp "github.com/google/cadvisor/http"
 	cadvisorApi "github.com/google/cadvisor/info/v1"
@@ -41,8 +42,8 @@ type cadvisorClient struct {
 var _ Interface = new(cadvisorClient)
 
 // TODO(vmarmol): Make configurable.
-// The number of stats to keep in memory.
-const statsToCache = 60
+// The amount of time for which to keep stats in memory.
+const statsCacheDuration = 2 * time.Minute
 
 // Creates a cAdvisor and exports its API on the specified port if port > 0.
 func New(port uint) (Interface, error) {
@@ -52,11 +53,7 @@ func New(port uint) (Interface, error) {
 	}
 
 	// Create and start the cAdvisor container manager.
-	m, err := manager.New(memory.New(statsToCache, nil), sysFs)
-	if err != nil {
-		return nil, err
-	}
-	err = m.Start()
+	m, err := manager.New(memory.New(statsCacheDuration, nil), sysFs)
 	if err != nil {
 		return nil, err
 	}
@@ -72,13 +69,16 @@ func New(port uint) (Interface, error) {
 			return nil, err
 		}
 	}
-
 	return cadvisorClient, nil
 }
 
-func (self *cadvisorClient) exportHTTP(port uint) error {
+func (cc *cadvisorClient) Start() error {
+	return cc.Manager.Start()
+}
+
+func (cc *cadvisorClient) exportHTTP(port uint) error {
 	mux := http.NewServeMux()
-	err := cadvisorHttp.RegisterHandlers(mux, self, "", "", "", "", "/metrics")
+	err := cadvisorHttp.RegisterHandlers(mux, cc, "", "", "", "", "/metrics")
 	if err != nil {
 		return err
 	}
@@ -105,26 +105,55 @@ func (self *cadvisorClient) exportHTTP(port uint) error {
 	return nil
 }
 
-func (self *cadvisorClient) ContainerInfo(name string, req *cadvisorApi.ContainerInfoRequest) (*cadvisorApi.ContainerInfo, error) {
-	return self.GetContainerInfo(name, req)
+func (cc *cadvisorClient) ContainerInfo(name string, req *cadvisorApi.ContainerInfoRequest) (*cadvisorApi.ContainerInfo, error) {
+	return cc.GetContainerInfo(name, req)
 }
 
-func (self *cadvisorClient) MachineInfo() (*cadvisorApi.MachineInfo, error) {
-	return self.GetMachineInfo()
+func (cc *cadvisorClient) VersionInfo() (*cadvisorApi.VersionInfo, error) {
+	return cc.GetVersionInfo()
 }
 
-func (self *cadvisorClient) DockerImagesFsInfo() (cadvisorApiV2.FsInfo, error) {
-	res, err := self.GetFsInfo(cadvisorFs.LabelDockerImages)
+func (cc *cadvisorClient) SubcontainerInfo(name string, req *cadvisorApi.ContainerInfoRequest) (map[string]*cadvisorApi.ContainerInfo, error) {
+	infos, err := cc.SubcontainersInfo(name, req)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]*cadvisorApi.ContainerInfo, len(infos))
+	for _, info := range infos {
+		result[info.Name] = info
+	}
+	return result, nil
+}
+
+func (cc *cadvisorClient) MachineInfo() (*cadvisorApi.MachineInfo, error) {
+	return cc.GetMachineInfo()
+}
+
+func (cc *cadvisorClient) DockerImagesFsInfo() (cadvisorApiV2.FsInfo, error) {
+	return cc.getFsInfo(cadvisorFs.LabelDockerImages)
+}
+
+func (cc *cadvisorClient) RootFsInfo() (cadvisorApiV2.FsInfo, error) {
+	return cc.getFsInfo(cadvisorFs.LabelSystemRoot)
+}
+
+func (cc *cadvisorClient) getFsInfo(label string) (cadvisorApiV2.FsInfo, error) {
+	res, err := cc.GetFsInfo(label)
 	if err != nil {
 		return cadvisorApiV2.FsInfo{}, err
 	}
 	if len(res) == 0 {
-		return cadvisorApiV2.FsInfo{}, fmt.Errorf("failed to find information for the filesystem containing Docker images")
+		return cadvisorApiV2.FsInfo{}, fmt.Errorf("failed to find information for the filesystem labeled %q", label)
 	}
-	// TODO(vmarmol): Handle this better when Docker has more than one image filesystem.
+	// TODO(vmarmol): Handle this better when a label has more than one image filesystem.
 	if len(res) > 1 {
-		glog.Warningf("More than one Docker images filesystem: %#v. Only using the first one", res)
+		glog.Warningf("More than one filesystem labeled %q: %#v. Only using the first one", label, res)
 	}
 
 	return res[0], nil
+}
+
+func (cc *cadvisorClient) WatchEvents(request *events.Request) (*events.EventChannel, error) {
+	return cc.WatchForEvents(request)
 }

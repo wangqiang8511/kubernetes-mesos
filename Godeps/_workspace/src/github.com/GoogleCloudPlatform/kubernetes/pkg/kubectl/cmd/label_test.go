@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/testapi"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 )
@@ -291,10 +292,10 @@ func TestLabelErrors(t *testing.T) {
 		f, tf, _ := NewAPIFactory()
 		tf.Printer = &testPrinter{}
 		tf.Namespace = "test"
-		tf.ClientConfig = &client.Config{Version: "v1beta1"}
+		tf.ClientConfig = &client.Config{Version: testapi.Version()}
 
 		buf := bytes.NewBuffer([]byte{})
-		cmd := f.NewCmdLabel(buf)
+		cmd := NewCmdLabel(f, buf)
 		cmd.SetOutput(buf)
 
 		for k, v := range testCase.flags {
@@ -348,10 +349,10 @@ func TestLabelMultipleObjects(t *testing.T) {
 		}),
 	}
 	tf.Namespace = "test"
-	tf.ClientConfig = &client.Config{Version: "v1beta1"}
+	tf.ClientConfig = &client.Config{Version: testapi.Version()}
 	buf := bytes.NewBuffer([]byte{})
 
-	cmd := f.NewCmdLabel(buf)
+	cmd := NewCmdLabel(f, buf)
 
 	cmd.Flags().Set("all", "true")
 	if err := RunLabel(f, buf, cmd, []string{"pods", "a=b"}); err != nil {

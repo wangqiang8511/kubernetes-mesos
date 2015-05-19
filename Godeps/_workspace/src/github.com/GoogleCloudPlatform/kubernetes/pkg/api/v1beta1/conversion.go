@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package v1beta1
 import (
 	"fmt"
 	"net"
+	"reflect"
 	"strconv"
 
 	newer "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
@@ -27,7 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 )
 
-func init() {
+func addConversionFuncs() {
 	// Our TypeMeta was split into two different structs.
 	newer.Scheme.AddStructFieldConversion(TypeMeta{}, "TypeMeta", newer.TypeMeta{}, "TypeMeta")
 	newer.Scheme.AddStructFieldConversion(TypeMeta{}, "TypeMeta", newer.ObjectMeta{}, "ObjectMeta")
@@ -116,6 +117,11 @@ func init() {
 			out.Value = in.Value
 			out.Key = in.Name
 			out.Name = in.Name
+
+			if err := s.Convert(&in.ValueFrom, &out.ValueFrom, 0); err != nil {
+				return err
+			}
+
 			return nil
 		},
 		func(in *EnvVar, out *newer.EnvVar, s conversion.Scope) error {
@@ -125,9 +131,13 @@ func init() {
 			} else {
 				out.Name = in.Key
 			}
+
+			if err := s.Convert(&in.ValueFrom, &out.ValueFrom, 0); err != nil {
+				return err
+			}
+
 			return nil
 		},
-
 		// Path & MountType are deprecated.
 		func(in *newer.VolumeMount, out *VolumeMount, s conversion.Scope) error {
 			out.Name = in.Name
@@ -192,7 +202,6 @@ func init() {
 				return err
 			}
 			out.Message = in.Message
-			out.Host = in.Host
 			out.HostIP = in.HostIP
 			out.PodIP = in.PodIP
 			return nil
@@ -209,7 +218,6 @@ func init() {
 			}
 
 			out.Message = in.Message
-			out.Host = in.Host
 			out.HostIP = in.HostIP
 			out.PodIP = in.PodIP
 			return nil
@@ -368,6 +376,8 @@ func init() {
 				return err
 			}
 			out.DesiredState.Host = in.Spec.Host
+			out.CurrentState.Host = in.Spec.Host
+			out.ServiceAccount = in.Spec.ServiceAccount
 			if err := s.Convert(&in.Status, &out.CurrentState, 0); err != nil {
 				return err
 			}
@@ -390,6 +400,7 @@ func init() {
 				return err
 			}
 			out.Spec.Host = in.DesiredState.Host
+			out.Spec.ServiceAccount = in.ServiceAccount
 			if err := s.Convert(&in.CurrentState, &out.Status, 0); err != nil {
 				return err
 			}
@@ -494,6 +505,7 @@ func init() {
 				return err
 			}
 			out.DesiredState.Host = in.Spec.Host
+			out.ServiceAccount = in.Spec.ServiceAccount
 			if err := s.Convert(&in.Spec.NodeSelector, &out.NodeSelector, 0); err != nil {
 				return err
 			}
@@ -510,6 +522,7 @@ func init() {
 				return err
 			}
 			out.Spec.Host = in.DesiredState.Host
+			out.Spec.ServiceAccount = in.ServiceAccount
 			if err := s.Convert(&in.NodeSelector, &out.Spec.NodeSelector, 0); err != nil {
 				return err
 			}
@@ -532,7 +545,10 @@ func init() {
 			if err := s.Convert(&in.Image, &out.Image, 0); err != nil {
 				return err
 			}
-			if err := s.Convert(&in.Command, &out.Command, 0); err != nil {
+			if err := s.Convert(&in.Command, &out.Entrypoint, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Args, &out.Command, 0); err != nil {
 				return err
 			}
 			if err := s.Convert(&in.WorkingDir, &out.WorkingDir, 0); err != nil {
@@ -568,14 +584,19 @@ func init() {
 			if err := s.Convert(&in.TerminationMessagePath, &out.TerminationMessagePath, 0); err != nil {
 				return err
 			}
-			if err := s.Convert(&in.Privileged, &out.Privileged, 0); err != nil {
-				return err
-			}
 			if err := s.Convert(&in.ImagePullPolicy, &out.ImagePullPolicy, 0); err != nil {
 				return err
 			}
-			if err := s.Convert(&in.Capabilities, &out.Capabilities, 0); err != nil {
+			if err := s.Convert(&in.SecurityContext, &out.SecurityContext, 0); err != nil {
 				return err
+			}
+			// now that we've converted set the container field from security context
+			if out.SecurityContext != nil && out.SecurityContext.Privileged != nil {
+				out.Privileged = *out.SecurityContext.Privileged
+			}
+			// now that we've converted set the container field from security context
+			if out.SecurityContext != nil && out.SecurityContext.Capabilities != nil {
+				out.Capabilities = *out.SecurityContext.Capabilities
 			}
 			return nil
 		},
@@ -615,7 +636,10 @@ func init() {
 			if err := s.Convert(&in.Image, &out.Image, 0); err != nil {
 				return err
 			}
-			if err := s.Convert(&in.Command, &out.Command, 0); err != nil {
+			if err := s.Convert(&in.Command, &out.Args, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Entrypoint, &out.Command, 0); err != nil {
 				return err
 			}
 			if err := s.Convert(&in.WorkingDir, &out.WorkingDir, 0); err != nil {
@@ -651,13 +675,23 @@ func init() {
 			if err := s.Convert(&in.TerminationMessagePath, &out.TerminationMessagePath, 0); err != nil {
 				return err
 			}
-			if err := s.Convert(&in.Privileged, &out.Privileged, 0); err != nil {
-				return err
-			}
 			if err := s.Convert(&in.ImagePullPolicy, &out.ImagePullPolicy, 0); err != nil {
 				return err
 			}
-			if err := s.Convert(&in.Capabilities, &out.Capabilities, 0); err != nil {
+			if in.SecurityContext != nil {
+				if in.SecurityContext.Capabilities != nil {
+					if !reflect.DeepEqual(in.SecurityContext.Capabilities.Add, in.Capabilities.Add) ||
+						!reflect.DeepEqual(in.SecurityContext.Capabilities.Drop, in.Capabilities.Drop) {
+						return fmt.Errorf("container capability settings do not match security context settings, cannot convert")
+					}
+				}
+				if in.SecurityContext.Privileged != nil {
+					if in.Privileged != *in.SecurityContext.Privileged {
+						return fmt.Errorf("container privileged settings do not match security context settings, cannot convert")
+					}
+				}
+			}
+			if err := s.Convert(&in.SecurityContext, &out.SecurityContext, 0); err != nil {
 				return err
 			}
 			return nil
@@ -671,6 +705,14 @@ func init() {
 			}
 			if err := s.Convert(&in.RestartPolicy, &out.RestartPolicy, 0); err != nil {
 				return err
+			}
+			if in.TerminationGracePeriodSeconds != nil {
+				out.TerminationGracePeriodSeconds = new(int64)
+				*out.TerminationGracePeriodSeconds = *in.TerminationGracePeriodSeconds
+			}
+			if in.ActiveDeadlineSeconds != nil {
+				out.ActiveDeadlineSeconds = new(int64)
+				*out.ActiveDeadlineSeconds = *in.ActiveDeadlineSeconds
 			}
 			out.DNSPolicy = DNSPolicy(in.DNSPolicy)
 			out.Version = "v1beta2"
@@ -686,6 +728,14 @@ func init() {
 			}
 			if err := s.Convert(&in.RestartPolicy, &out.RestartPolicy, 0); err != nil {
 				return err
+			}
+			if in.TerminationGracePeriodSeconds != nil {
+				out.TerminationGracePeriodSeconds = new(int64)
+				*out.TerminationGracePeriodSeconds = *in.TerminationGracePeriodSeconds
+			}
+			if in.ActiveDeadlineSeconds != nil {
+				out.ActiveDeadlineSeconds = new(int64)
+				*out.ActiveDeadlineSeconds = *in.ActiveDeadlineSeconds
 			}
 			out.DNSPolicy = newer.DNSPolicy(in.DNSPolicy)
 			out.HostNetwork = in.HostNetwork
@@ -703,14 +753,29 @@ func init() {
 				return err
 			}
 
-			out.Port = in.Spec.Port
-			out.Protocol = Protocol(in.Spec.Protocol)
+			// Produce legacy fields.
+			out.Protocol = ProtocolTCP
+			if len(in.Spec.Ports) > 0 {
+				out.PortName = in.Spec.Ports[0].Name
+				out.Port = in.Spec.Ports[0].Port
+				out.Protocol = Protocol(in.Spec.Ports[0].Protocol)
+				out.ContainerPort = in.Spec.Ports[0].TargetPort
+			}
+			// Copy modern fields.
+			for i := range in.Spec.Ports {
+				out.Ports = append(out.Ports, ServicePort{
+					Name:          in.Spec.Ports[i].Name,
+					Port:          in.Spec.Ports[i].Port,
+					Protocol:      Protocol(in.Spec.Ports[i].Protocol),
+					ContainerPort: in.Spec.Ports[i].TargetPort,
+				})
+			}
+
 			if err := s.Convert(&in.Spec.Selector, &out.Selector, 0); err != nil {
 				return err
 			}
 			out.CreateExternalLoadBalancer = in.Spec.CreateExternalLoadBalancer
 			out.PublicIPs = in.Spec.PublicIPs
-			out.ContainerPort = in.Spec.TargetPort
 			out.PortalIP = in.Spec.PortalIP
 			if err := s.Convert(&in.Spec.SessionAffinity, &out.SessionAffinity, 0); err != nil {
 				return err
@@ -729,14 +794,31 @@ func init() {
 				return err
 			}
 
-			out.Spec.Port = in.Port
-			out.Spec.Protocol = newer.Protocol(in.Protocol)
+			if len(in.Ports) == 0 && in.Port != 0 {
+				// Use legacy fields to produce modern fields.
+				out.Spec.Ports = append(out.Spec.Ports, newer.ServicePort{
+					Name:       in.PortName,
+					Port:       in.Port,
+					Protocol:   newer.Protocol(in.Protocol),
+					TargetPort: in.ContainerPort,
+				})
+			} else {
+				// Use modern fields, ignore legacy.
+				for i := range in.Ports {
+					out.Spec.Ports = append(out.Spec.Ports, newer.ServicePort{
+						Name:       in.Ports[i].Name,
+						Port:       in.Ports[i].Port,
+						Protocol:   newer.Protocol(in.Ports[i].Protocol),
+						TargetPort: in.Ports[i].ContainerPort,
+					})
+				}
+			}
+
 			if err := s.Convert(&in.Selector, &out.Spec.Selector, 0); err != nil {
 				return err
 			}
 			out.Spec.CreateExternalLoadBalancer = in.CreateExternalLoadBalancer
 			out.Spec.PublicIPs = in.PublicIPs
-			out.Spec.TargetPort = in.ContainerPort
 			out.Spec.PortalIP = in.PortalIP
 			if err := s.Convert(&in.SessionAffinity, &out.Spec.SessionAffinity, 0); err != nil {
 				return err
@@ -885,6 +967,9 @@ func init() {
 			if err := s.Convert(&in.Min, &out.Min, 0); err != nil {
 				return err
 			}
+			if err := s.Convert(&in.Default, &out.Default, 0); err != nil {
+				return err
+			}
 			return nil
 		},
 		func(in *LimitRangeItem, out *newer.LimitRangeItem, s conversion.Scope) error {
@@ -894,6 +979,9 @@ func init() {
 				return err
 			}
 			if err := s.Convert(&in.Min, &out.Min, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Default, &out.Default, 0); err != nil {
 				return err
 			}
 			return nil
@@ -1124,6 +1212,12 @@ func init() {
 			if err := s.Convert(&in.GCEPersistentDisk, &out.GCEPersistentDisk, 0); err != nil {
 				return err
 			}
+			if err := s.Convert(&in.ISCSI, &out.ISCSI, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.AWSElasticBlockStore, &out.AWSElasticBlockStore, 0); err != nil {
+				return err
+			}
 			if err := s.Convert(&in.HostPath, &out.HostDir, 0); err != nil {
 				return err
 			}
@@ -1131,6 +1225,12 @@ func init() {
 				return err
 			}
 			if err := s.Convert(&in.NFS, &out.NFS, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Glusterfs, &out.Glusterfs, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.PersistentVolumeClaimVolumeSource, &out.PersistentVolumeClaimVolumeSource, 0); err != nil {
 				return err
 			}
 			return nil
@@ -1145,6 +1245,12 @@ func init() {
 			if err := s.Convert(&in.GCEPersistentDisk, &out.GCEPersistentDisk, 0); err != nil {
 				return err
 			}
+			if err := s.Convert(&in.ISCSI, &out.ISCSI, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.AWSElasticBlockStore, &out.AWSElasticBlockStore, 0); err != nil {
+				return err
+			}
 			if err := s.Convert(&in.HostDir, &out.HostPath, 0); err != nil {
 				return err
 			}
@@ -1152,6 +1258,12 @@ func init() {
 				return err
 			}
 			if err := s.Convert(&in.NFS, &out.NFS, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.PersistentVolumeClaimVolumeSource, &out.PersistentVolumeClaimVolumeSource, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.Glusterfs, &out.Glusterfs, 0); err != nil {
 				return err
 			}
 			return nil
@@ -1314,7 +1426,7 @@ func init() {
 			if err := s.Convert(&in.Status, &out.Status, 0); err != nil {
 				return err
 			}
-			if err := s.Convert(&in.LastProbeTime, &out.LastProbeTime, 0); err != nil {
+			if err := s.Convert(&in.LastHeartbeatTime, &out.LastProbeTime, 0); err != nil {
 				return err
 			}
 			if err := s.Convert(&in.LastTransitionTime, &out.LastTransitionTime, 0); err != nil {
@@ -1335,7 +1447,7 @@ func init() {
 			if err := s.Convert(&in.Status, &out.Status, 0); err != nil {
 				return err
 			}
-			if err := s.Convert(&in.LastProbeTime, &out.LastProbeTime, 0); err != nil {
+			if err := s.Convert(&in.LastProbeTime, &out.LastHeartbeatTime, 0); err != nil {
 				return err
 			}
 			if err := s.Convert(&in.LastTransitionTime, &out.LastTransitionTime, 0); err != nil {
@@ -1352,9 +1464,6 @@ func init() {
 
 		func(in *newer.NodeConditionType, out *NodeConditionKind, s conversion.Scope) error {
 			switch *in {
-			case newer.NodeReachable:
-				*out = NodeReachable
-				break
 			case newer.NodeReady:
 				*out = NodeReady
 				break
@@ -1368,9 +1477,6 @@ func init() {
 		},
 		func(in *NodeConditionKind, out *newer.NodeConditionType, s conversion.Scope) error {
 			switch *in {
-			case NodeReachable:
-				*out = newer.NodeReachable
-				break
 			case NodeReady:
 				*out = newer.NodeReady
 				break
@@ -1497,7 +1603,7 @@ func init() {
 		func(label, value string) (string, string, error) {
 			switch label {
 			case "name":
-				return "name", value, nil
+				return "metadata.name", value, nil
 			case "DesiredState.Host":
 				return "spec.host", value, nil
 			case "DesiredState.Status":
@@ -1513,11 +1619,26 @@ func init() {
 		// If one of the conversion functions is malformed, detect it immediately.
 		panic(err)
 	}
+	err = newer.Scheme.AddFieldLabelConversionFunc("v1beta1", "Node",
+		func(label, value string) (string, string, error) {
+			switch label {
+			case "name":
+				return "metadata.name", value, nil
+			case "unschedulable":
+				return "spec.unschedulable", value, nil
+			default:
+				return "", "", fmt.Errorf("field label not supported: %s", label)
+			}
+		})
+	if err != nil {
+		// If one of the conversion functions is malformed, detect it immediately.
+		panic(err)
+	}
 	err = newer.Scheme.AddFieldLabelConversionFunc("v1beta1", "ReplicationController",
 		func(label, value string) (string, string, error) {
 			switch label {
 			case "name":
-				return "name", value, nil
+				return "metadata.name", value, nil
 			case "currentState.replicas":
 				return "status.replicas", value, nil
 			default:
@@ -1555,6 +1676,32 @@ func init() {
 			switch label {
 			case "status.phase":
 				return label, value, nil
+			default:
+				return "", "", fmt.Errorf("field label not supported: %s", label)
+			}
+		})
+	if err != nil {
+		// If one of the conversion functions is malformed, detect it immediately.
+		panic(err)
+	}
+	err = newer.Scheme.AddFieldLabelConversionFunc("v1beta1", "Secret",
+		func(label, value string) (string, string, error) {
+			switch label {
+			case "type":
+				return label, value, nil
+			default:
+				return "", "", fmt.Errorf("field label not supported: %s", label)
+			}
+		})
+	if err != nil {
+		// If one of the conversion functions is malformed, detect it immediately.
+		panic(err)
+	}
+	err = newer.Scheme.AddFieldLabelConversionFunc("v1beta1", "ServiceAccount",
+		func(label, value string) (string, string, error) {
+			switch label {
+			case "name":
+				return "metadata.name", value, nil
 			default:
 				return "", "", fmt.Errorf("field label not supported: %s", label)
 			}

@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -35,10 +35,10 @@ func TestCanSupport(t *testing.T) {
 	if plug.Name() != "kubernetes.io/host-path" {
 		t.Errorf("Wrong name: %s", plug.Name())
 	}
-	if !plug.CanSupport(&api.Volume{VolumeSource: api.VolumeSource{HostPath: &api.HostPathVolumeSource{}}}) {
+	if !plug.CanSupport(&volume.Spec{Name: "foo", VolumeSource: api.VolumeSource{HostPath: &api.HostPathVolumeSource{}}}) {
 		t.Errorf("Expected true")
 	}
-	if plug.CanSupport(&api.Volume{VolumeSource: api.VolumeSource{}}) {
+	if plug.CanSupport(&volume.Spec{Name: "foo", VolumeSource: api.VolumeSource{}}) {
 		t.Errorf("Expected false")
 	}
 }
@@ -52,7 +52,7 @@ func TestGetAccessModes(t *testing.T) {
 		t.Errorf("Can't find the plugin by name")
 	}
 	if len(plug.GetAccessModes()) != 1 || plug.GetAccessModes()[0] != api.ReadWriteOnce {
-		t.Errorf("Expected %s AccessModeType", api.ReadWriteOnce)
+		t.Errorf("Expected %s PersistentVolumeAccessMode", api.ReadWriteOnce)
 	}
 }
 
@@ -68,12 +68,13 @@ func TestPlugin(t *testing.T) {
 		Name:         "vol1",
 		VolumeSource: api.VolumeSource{HostPath: &api.HostPathVolumeSource{"/vol1"}},
 	}
-	builder, err := plug.NewBuilder(spec, &api.ObjectReference{UID: types.UID("poduid")})
+	pod := &api.Pod{ObjectMeta: api.ObjectMeta{UID: types.UID("poduid")}}
+	builder, err := plug.NewBuilder(volume.NewSpecFromVolume(spec), pod, volume.VolumeOptions{}, nil)
 	if err != nil {
 		t.Errorf("Failed to make a new Builder: %v", err)
 	}
 	if builder == nil {
-		t.Errorf("Got a nil Builder: %v")
+		t.Errorf("Got a nil Builder")
 	}
 
 	path := builder.GetPath()
@@ -85,12 +86,12 @@ func TestPlugin(t *testing.T) {
 		t.Errorf("Expected success, got: %v", err)
 	}
 
-	cleaner, err := plug.NewCleaner("vol1", types.UID("poduid"))
+	cleaner, err := plug.NewCleaner("vol1", types.UID("poduid"), nil)
 	if err != nil {
 		t.Errorf("Failed to make a new Cleaner: %v", err)
 	}
 	if cleaner == nil {
-		t.Errorf("Got a nil Cleaner: %v")
+		t.Errorf("Got a nil Cleaner")
 	}
 
 	if err := cleaner.TearDown(); err != nil {

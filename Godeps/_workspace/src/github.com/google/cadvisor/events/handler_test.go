@@ -17,6 +17,9 @@ package events
 import (
 	"testing"
 	"time"
+
+	info "github.com/google/cadvisor/info/v1"
+	"github.com/stretchr/testify/assert"
 )
 
 func createOldTime(t *testing.T) time.Time {
@@ -31,20 +34,20 @@ func createOldTime(t *testing.T) time.Time {
 }
 
 // used to convert an OomInstance to an Event object
-func makeEvent(inTime time.Time, containerName string) *Event {
-	return &Event{
+func makeEvent(inTime time.Time, containerName string) *info.Event {
+	return &info.Event{
 		ContainerName: containerName,
 		Timestamp:     inTime,
-		EventType:     TypeOom,
+		EventType:     info.EventOom,
 	}
 }
 
 // returns EventManager and Request to use in tests
-func initializeScenario(t *testing.T) (*events, *Request, *Event, *Event) {
+func initializeScenario(t *testing.T) (*events, *Request, *info.Event, *info.Event) {
 	fakeEvent := makeEvent(createOldTime(t), "/")
 	fakeEvent2 := makeEvent(time.Now(), "/")
 
-	return NewEventManager(), NewRequest(), fakeEvent, fakeEvent2
+	return NewEventManager(DefaultStoragePolicy()), NewRequest(), fakeEvent, fakeEvent2
 }
 
 func checkNumberOfEvents(t *testing.T, numEventsExpected int, numEventsReceived int) {
@@ -54,7 +57,7 @@ func checkNumberOfEvents(t *testing.T, numEventsExpected int, numEventsReceived 
 	}
 }
 
-func ensureProperEventReturned(t *testing.T, expectedEvent *Event, eventObjectFound *Event) {
+func ensureProperEventReturned(t *testing.T, expectedEvent *info.Event, eventObjectFound *info.Event) {
 	if eventObjectFound != expectedEvent {
 		t.Errorf("Expected to find test object %v but found a different object: %v",
 			expectedEvent, eventObjectFound)
@@ -64,17 +67,23 @@ func ensureProperEventReturned(t *testing.T, expectedEvent *Event, eventObjectFo
 func TestCheckIfIsSubcontainer(t *testing.T) {
 	myRequest := NewRequest()
 	myRequest.ContainerName = "/root"
+	rootRequest := NewRequest()
+	rootRequest.ContainerName = "/"
 
-	sameContainerEvent := &Event{
+	sameContainerEvent := &info.Event{
 		ContainerName: "/root",
 	}
-	subContainerEvent := &Event{
+	subContainerEvent := &info.Event{
 		ContainerName: "/root/subdir",
 	}
-	differentContainerEvent := &Event{
+	differentContainerEvent := &info.Event{
 		ContainerName: "/root-completely-different-container",
 	}
 
+	if checkIfIsSubcontainer(rootRequest, sameContainerEvent) {
+		t.Errorf("should not have found %v to be a subcontainer of %v",
+			sameContainerEvent, rootRequest)
+	}
 	if !checkIfIsSubcontainer(myRequest, sameContainerEvent) {
 		t.Errorf("should have found %v and %v had the same container name",
 			myRequest, sameContainerEvent)
@@ -84,8 +93,13 @@ func TestCheckIfIsSubcontainer(t *testing.T) {
 			myRequest, subContainerEvent)
 	}
 
+	rootRequest.IncludeSubcontainers = true
 	myRequest.IncludeSubcontainers = true
 
+	if !checkIfIsSubcontainer(rootRequest, sameContainerEvent) {
+		t.Errorf("should have found %v to be a subcontainer of %v",
+			sameContainerEvent.ContainerName, rootRequest.ContainerName)
+	}
 	if !checkIfIsSubcontainer(myRequest, sameContainerEvent) {
 		t.Errorf("should have found %v and %v had the same container",
 			myRequest.ContainerName, sameContainerEvent.ContainerName)
@@ -102,9 +116,9 @@ func TestCheckIfIsSubcontainer(t *testing.T) {
 
 func TestWatchEventsDetectsNewEvents(t *testing.T) {
 	myEventHolder, myRequest, fakeEvent, fakeEvent2 := initializeScenario(t)
-	myRequest.EventType[TypeOom] = true
-	outChannel := make(chan *Event, 10)
-	myEventHolder.WatchEvents(outChannel, myRequest)
+	myRequest.EventType[info.EventOom] = true
+	returnEventChannel, err := myEventHolder.WatchEvents(myRequest)
+	assert.Nil(t, err)
 
 	myEventHolder.AddEvent(fakeEvent)
 	myEventHolder.AddEvent(fakeEvent2)
@@ -114,19 +128,17 @@ func TestWatchEventsDetectsNewEvents(t *testing.T) {
 		time.Sleep(5 * time.Second)
 		if time.Since(startTime) > (5 * time.Second) {
 			t.Errorf("Took too long to receive all the events")
-			close(outChannel)
 		}
 	}()
 
 	eventsFound := 0
 	go func() {
-		for event := range outChannel {
+		for event := range returnEventChannel.GetChannel() {
 			eventsFound += 1
 			if eventsFound == 1 {
 				ensureProperEventReturned(t, fakeEvent, event)
 			} else if eventsFound == 2 {
 				ensureProperEventReturned(t, fakeEvent2, event)
-				close(outChannel)
 				break
 			}
 		}
@@ -138,42 +150,38 @@ func TestAddEventAddsEventsToEventManager(t *testing.T) {
 
 	myEventHolder.AddEvent(fakeEvent)
 
-	checkNumberOfEvents(t, 1, myEventHolder.eventlist.Len())
-	ensureProperEventReturned(t, fakeEvent, myEventHolder.eventlist[0])
+	checkNumberOfEvents(t, 1, len(myEventHolder.eventStore))
+	ensureProperEventReturned(t, fakeEvent, myEventHolder.eventStore[info.EventOom].Get(0).(*info.Event))
 }
 
 func TestGetEventsForOneEvent(t *testing.T) {
 	myEventHolder, myRequest, fakeEvent, fakeEvent2 := initializeScenario(t)
 	myRequest.MaxEventsReturned = 1
-	myRequest.EventType[TypeOom] = true
+	myRequest.EventType[info.EventOom] = true
 
 	myEventHolder.AddEvent(fakeEvent)
 	myEventHolder.AddEvent(fakeEvent2)
 
 	receivedEvents, err := myEventHolder.GetEvents(myRequest)
-	if err != nil {
-		t.Errorf("Failed to GetEvents: %v", err)
-	}
-	checkNumberOfEvents(t, 1, receivedEvents.Len())
+	assert.Nil(t, err)
+	checkNumberOfEvents(t, 1, len(receivedEvents))
 	ensureProperEventReturned(t, fakeEvent2, receivedEvents[0])
 }
 
 func TestGetEventsForTimePeriod(t *testing.T) {
 	myEventHolder, myRequest, fakeEvent, fakeEvent2 := initializeScenario(t)
-	myRequest.StartTime = createOldTime(t).Add(-1 * time.Second * 10)
-	myRequest.EndTime = createOldTime(t).Add(time.Second * 10)
-	myRequest.EventType[TypeOom] = true
+	myRequest.StartTime = time.Now().Add(-1 * time.Second * 10)
+	myRequest.EndTime = time.Now().Add(time.Second * 10)
+	myRequest.EventType[info.EventOom] = true
 
 	myEventHolder.AddEvent(fakeEvent)
 	myEventHolder.AddEvent(fakeEvent2)
 
 	receivedEvents, err := myEventHolder.GetEvents(myRequest)
-	if err != nil {
-		t.Errorf("Failed to GetEvents: %v", err)
-	}
+	assert.Nil(t, err)
 
-	checkNumberOfEvents(t, 1, receivedEvents.Len())
-	ensureProperEventReturned(t, fakeEvent, receivedEvents[0])
+	checkNumberOfEvents(t, 1, len(receivedEvents))
+	ensureProperEventReturned(t, fakeEvent2, receivedEvents[0])
 }
 
 func TestGetEventsForNoTypeRequested(t *testing.T) {
@@ -183,8 +191,6 @@ func TestGetEventsForNoTypeRequested(t *testing.T) {
 	myEventHolder.AddEvent(fakeEvent2)
 
 	receivedEvents, err := myEventHolder.GetEvents(myRequest)
-	if err != nil {
-		t.Errorf("Failed to GetEvents: %v", err)
-	}
-	checkNumberOfEvents(t, 0, receivedEvents.Len())
+	assert.Nil(t, err)
+	checkNumberOfEvents(t, 0, len(receivedEvents))
 }

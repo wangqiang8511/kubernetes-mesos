@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,13 +17,11 @@ limitations under the License.
 package gce_cloud
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
-	"os/exec"
 	"path"
 	"strconv"
 	"strings"
@@ -32,16 +30,17 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/resource"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 
+	"code.google.com/p/gcfg"
 	compute "code.google.com/p/google-api-go-client/compute/v1"
 	container "code.google.com/p/google-api-go-client/container/v1beta1"
+	"code.google.com/p/google-api-go-client/googleapi"
 	"github.com/golang/glog"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/cloud/compute/metadata"
 )
-
-const EXTERNAL_IP_METADATA_URL = "http://169.254.169.254/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip"
 
 // GCECloud is an implementation of Interface, TCPLoadBalancer and Instances for Google Compute Engine.
 type GCECloud struct {
@@ -51,12 +50,22 @@ type GCECloud struct {
 	zone             string
 	instanceID       string
 
+	// We assume here that nodes and master are in the same network. TODO(cjcullen) Fix it.
+	networkName string
+
 	// Used for accessing the metadata server
 	metadataAccess func(string) (string, error)
 }
 
+type Config struct {
+	Global struct {
+		TokenURL  string `gcfg:"token-url"`
+		ProjectID string `gcfg:"project-id"`
+	}
+}
+
 func init() {
-	cloudprovider.RegisterCloudProvider("gce", func(config io.Reader) (cloudprovider.Interface, error) { return newGCECloud() })
+	cloudprovider.RegisterCloudProvider("gce", func(config io.Reader) (cloudprovider.Interface, error) { return newGCECloud(config) })
 }
 
 func getMetadata(url string) (string, error) {
@@ -87,7 +96,12 @@ func getProjectAndZone() (string, string, error) {
 	if len(parts) != 4 {
 		return "", "", fmt.Errorf("unexpected response: %s", result)
 	}
-	return parts[1], parts[3], nil
+	zone := parts[3]
+	projectID, err := metadata.ProjectID()
+	if err != nil {
+		return "", "", err
+	}
+	return projectID, zone, nil
 }
 
 func getInstanceID() (string, error) {
@@ -102,8 +116,20 @@ func getInstanceID() (string, error) {
 	return parts[0], nil
 }
 
+func getNetworkName() (string, error) {
+	result, err := metadata.Get("instance/network-interfaces/0/network")
+	if err != nil {
+		return "", err
+	}
+	parts := strings.Split(result, "/")
+	if len(parts) != 4 {
+		return "", fmt.Errorf("unexpected response: %s", result)
+	}
+	return parts[3], nil
+}
+
 // newGCECloud creates a new instance of GCECloud.
-func newGCECloud() (*GCECloud, error) {
+func newGCECloud(config io.Reader) (*GCECloud, error) {
 	projectID, zone, err := getProjectAndZone()
 	if err != nil {
 		return nil, err
@@ -115,7 +141,22 @@ func newGCECloud() (*GCECloud, error) {
 	if err != nil {
 		return nil, err
 	}
-	client := oauth2.NewClient(oauth2.NoContext, google.ComputeTokenSource(""))
+	networkName, err := getNetworkName()
+	if err != nil {
+		return nil, err
+	}
+	tokenSource := google.ComputeTokenSource("")
+	if config != nil {
+		var cfg Config
+		if err := gcfg.ReadInto(&cfg, config); err != nil {
+			return nil, err
+		}
+		if cfg.Global.ProjectID != "" && cfg.Global.TokenURL != "" {
+			projectID = cfg.Global.ProjectID
+			tokenSource = newAltTokenSource(cfg.Global.TokenURL)
+		}
+	}
+	client := oauth2.NewClient(oauth2.NoContext, tokenSource)
 	svc, err := compute.New(client)
 	if err != nil {
 		return nil, err
@@ -130,6 +171,7 @@ func newGCECloud() (*GCECloud, error) {
 		projectID:        projectID,
 		zone:             zone,
 		instanceID:       instanceID,
+		networkName:      networkName,
 		metadataAccess:   getMetadata,
 	}, nil
 }
@@ -171,7 +213,7 @@ const (
 	GCEAffinityTypeClientIPProto GCEAffinityType = "CLIENT_IP_PROTO"
 )
 
-func (gce *GCECloud) makeTargetPool(name, region string, hosts []string, affinityType GCEAffinityType) (string, error) {
+func (gce *GCECloud) makeTargetPool(name, region string, hosts []string, affinityType GCEAffinityType) error {
 	var instances []string
 	for _, host := range hosts {
 		instances = append(instances, makeHostLink(gce.projectID, gce.zone, host))
@@ -183,43 +225,80 @@ func (gce *GCECloud) makeTargetPool(name, region string, hosts []string, affinit
 	}
 	op, err := gce.service.TargetPools.Insert(gce.projectID, region, pool).Do()
 	if err != nil {
-		return "", err
+		return err
 	}
 	if err = gce.waitForRegionOp(op, region); err != nil {
-		return "", err
+		return err
 	}
-	link := fmt.Sprintf("https://www.googleapis.com/compute/v1/projects/%s/regions/%s/targetPools/%s", gce.projectID, region, name)
-	return link, nil
+	return nil
 }
 
-func (gce *GCECloud) waitForRegionOp(op *compute.Operation, region string) error {
+func (gce *GCECloud) targetPoolURL(name, region string) string {
+	return fmt.Sprintf("https://www.googleapis.com/compute/v1/projects/%s/regions/%s/targetPools/%s", gce.projectID, region, name)
+}
+
+func waitForOp(op *compute.Operation, getOperation func() (*compute.Operation, error)) error {
 	pollOp := op
 	for pollOp.Status != "DONE" {
 		var err error
+		// TODO: add some backoff here.
 		time.Sleep(time.Second)
-		pollOp, err = gce.service.RegionOperations.Get(gce.projectID, region, op.Name).Do()
+		pollOp, err = getOperation()
 		if err != nil {
 			return err
 		}
 	}
 	if pollOp.Error != nil && len(pollOp.Error.Errors) > 0 {
-		return errors.New(pollOp.Error.Errors[0].Message)
+		return &googleapi.Error{
+			Code:    int(pollOp.HttpErrorStatusCode),
+			Message: pollOp.Error.Errors[0].Message,
+		}
 	}
 	return nil
+
 }
 
-// TCPLoadBalancerExists is an implementation of TCPLoadBalancer.TCPLoadBalancerExists.
-func (gce *GCECloud) TCPLoadBalancerExists(name, region string) (bool, error) {
-	_, err := gce.service.ForwardingRules.Get(gce.projectID, region, name).Do()
-	return false, err
+func (gce *GCECloud) waitForGlobalOp(op *compute.Operation) error {
+	return waitForOp(op, func() (*compute.Operation, error) {
+		return gce.service.GlobalOperations.Get(gce.projectID, op.Name).Do()
+	})
 }
 
-//translate from what K8s supports to what the cloud provider supports for session affinity.
-func translateAffinityType(affinityType api.AffinityType) GCEAffinityType {
+func (gce *GCECloud) waitForRegionOp(op *compute.Operation, region string) error {
+	return waitForOp(op, func() (*compute.Operation, error) {
+		return gce.service.RegionOperations.Get(gce.projectID, region, op.Name).Do()
+	})
+}
+
+func (gce *GCECloud) waitForZoneOp(op *compute.Operation) error {
+	return waitForOp(op, func() (*compute.Operation, error) {
+		return gce.service.ZoneOperations.Get(gce.projectID, gce.zone, op.Name).Do()
+	})
+}
+
+// GetTCPLoadBalancer is an implementation of TCPLoadBalancer.GetTCPLoadBalancer
+func (gce *GCECloud) GetTCPLoadBalancer(name, region string) (endpoint string, exists bool, err error) {
+	fw, err := gce.service.ForwardingRules.Get(gce.projectID, region, name).Do()
+	if err == nil {
+		return fw.IPAddress, true, nil
+	}
+	if isHTTPErrorCode(err, http.StatusNotFound) {
+		return "", false, nil
+	}
+	return "", false, err
+}
+
+func isHTTPErrorCode(err error, code int) bool {
+	apiErr, ok := err.(*googleapi.Error)
+	return ok && apiErr.Code == code
+}
+
+// translate from what K8s supports to what the cloud provider supports for session affinity.
+func translateAffinityType(affinityType api.ServiceAffinity) GCEAffinityType {
 	switch affinityType {
-	case api.AffinityTypeClientIP:
+	case api.ServiceAffinityClientIP:
 		return GCEAffinityTypeClientIP
-	case api.AffinityTypeNone:
+	case api.ServiceAffinityNone:
 		return GCEAffinityTypeNone
 	default:
 		glog.Errorf("unexpected affinity type: %v", affinityType)
@@ -228,27 +307,45 @@ func translateAffinityType(affinityType api.AffinityType) GCEAffinityType {
 }
 
 // CreateTCPLoadBalancer is an implementation of TCPLoadBalancer.CreateTCPLoadBalancer.
-func (gce *GCECloud) CreateTCPLoadBalancer(name, region string, externalIP net.IP, port int, hosts []string, affinityType api.AffinityType) (string, error) {
-	pool, err := gce.makeTargetPool(name, region, hosts, translateAffinityType(affinityType))
+// TODO(a-robinson): Don't just ignore specified IP addresses. Check if they're
+// owned by the project and available to be used, and use them if they are.
+func (gce *GCECloud) CreateTCPLoadBalancer(name, region string, externalIP net.IP, ports []int, hosts []string, affinityType api.ServiceAffinity) (string, error) {
+	err := gce.makeTargetPool(name, region, hosts, translateAffinityType(affinityType))
 	if err != nil {
-		return "", err
+		if !isHTTPErrorCode(err, http.StatusConflict) {
+			return "", err
+		}
+		glog.Infof("Creating forwarding rule pointing at target pool that already exists: %v", err)
+	}
+
+	if len(ports) == 0 {
+		return "", fmt.Errorf("no ports specified for GCE load balancer")
+	}
+	minPort := 65536
+	maxPort := 0
+	for i := range ports {
+		if ports[i] < minPort {
+			minPort = ports[i]
+		}
+		if ports[i] > maxPort {
+			maxPort = ports[i]
+		}
 	}
 	req := &compute.ForwardingRule{
 		Name:       name,
 		IPProtocol: "TCP",
-		PortRange:  strconv.Itoa(port),
-		Target:     pool,
-	}
-	if len(externalIP) > 0 {
-		req.IPAddress = externalIP.String()
+		PortRange:  fmt.Sprintf("%d-%d", minPort, maxPort),
+		Target:     gce.targetPoolURL(name, region),
 	}
 	op, err := gce.service.ForwardingRules.Insert(gce.projectID, region, req).Do()
-	if err != nil {
+	if err != nil && !isHTTPErrorCode(err, http.StatusConflict) {
 		return "", err
 	}
-	err = gce.waitForRegionOp(op, region)
-	if err != nil {
-		return "", err
+	if op != nil {
+		err = gce.waitForRegionOp(op, region)
+		if err != nil && !isHTTPErrorCode(err, http.StatusConflict) {
+			return "", err
+		}
 	}
 	fwd, err := gce.service.ForwardingRules.Get(gce.projectID, region, name).Do()
 	if err != nil {
@@ -259,42 +356,74 @@ func (gce *GCECloud) CreateTCPLoadBalancer(name, region string, externalIP net.I
 
 // UpdateTCPLoadBalancer is an implementation of TCPLoadBalancer.UpdateTCPLoadBalancer.
 func (gce *GCECloud) UpdateTCPLoadBalancer(name, region string, hosts []string) error {
-	var refs []*compute.InstanceReference
-	for _, host := range hosts {
-		refs = append(refs, &compute.InstanceReference{host})
-	}
-	req := &compute.TargetPoolsAddInstanceRequest{
-		Instances: refs,
-	}
-
-	op, err := gce.service.TargetPools.AddInstance(gce.projectID, region, name, req).Do()
+	pool, err := gce.service.TargetPools.Get(gce.projectID, region, name).Do()
 	if err != nil {
 		return err
 	}
-	err = gce.waitForRegionOp(op, region)
-	return err
+	existing := util.NewStringSet(pool.Instances...)
+
+	var toAdd []*compute.InstanceReference
+	var toRemove []*compute.InstanceReference
+	for _, host := range hosts {
+		link := makeHostLink(gce.projectID, gce.zone, host)
+		if !existing.Has(link) {
+			toAdd = append(toAdd, &compute.InstanceReference{link})
+		}
+		existing.Delete(link)
+	}
+	for link := range existing {
+		toRemove = append(toRemove, &compute.InstanceReference{link})
+	}
+
+	if len(toAdd) > 0 {
+		add := &compute.TargetPoolsAddInstanceRequest{Instances: toAdd}
+		op, err := gce.service.TargetPools.AddInstance(gce.projectID, region, name, add).Do()
+		if err != nil {
+			return err
+		}
+		if err := gce.waitForRegionOp(op, region); err != nil {
+			return err
+		}
+	}
+
+	if len(toRemove) > 0 {
+		rm := &compute.TargetPoolsRemoveInstanceRequest{Instances: toRemove}
+		op, err := gce.service.TargetPools.RemoveInstance(gce.projectID, region, name, rm).Do()
+		if err != nil {
+			return err
+		}
+		if err := gce.waitForRegionOp(op, region); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // DeleteTCPLoadBalancer is an implementation of TCPLoadBalancer.DeleteTCPLoadBalancer.
 func (gce *GCECloud) DeleteTCPLoadBalancer(name, region string) error {
 	op, err := gce.service.ForwardingRules.Delete(gce.projectID, region, name).Do()
-	if err != nil {
-		glog.Warningln("Failed to delete Forwarding Rules %s: got error %s. Trying to delete Target Pool", name, err.Error())
+	if err != nil && isHTTPErrorCode(err, http.StatusNotFound) {
+		glog.Infof("Forwarding rule %s already deleted. Continuing to delete target pool.", name)
+	} else if err != nil {
+		glog.Warningf("Failed to delete Forwarding Rules %s: got error %s.", name, err.Error())
 		return err
 	} else {
 		err = gce.waitForRegionOp(op, region)
 		if err != nil {
-			glog.Warningln("Failed waiting for Forwarding Rule %s to be deleted: got error %s. Trying to delete Target Pool", name, err.Error())
+			glog.Warningf("Failed waiting for Forwarding Rule %s to be deleted: got error %s.", name, err.Error())
 		}
 	}
 	op, err = gce.service.TargetPools.Delete(gce.projectID, region, name).Do()
-	if err != nil {
-		glog.Warningln("Failed to delete Target Pool %s, got error %s.", name, err.Error())
+	if err != nil && isHTTPErrorCode(err, http.StatusNotFound) {
+		glog.Infof("Target pool %s already deleted.", name)
+		return nil
+	} else if err != nil {
+		glog.Warningf("Failed to delete Target Pool %s, got error %s.", name, err.Error())
 		return err
 	}
 	err = gce.waitForRegionOp(op, region)
 	if err != nil {
-		glog.Warningln("Failed waiting for Target Pool %s to be deleted: got error %s.", name, err.Error())
+		glog.Warningf("Failed waiting for Target Pool %s to be deleted: got error %s.", name, err.Error())
 	}
 	return err
 }
@@ -323,24 +452,28 @@ func (gce *GCECloud) getInstanceByName(name string) (*compute.Instance, error) {
 
 // NodeAddresses is an implementation of Instances.NodeAddresses.
 func (gce *GCECloud) NodeAddresses(instance string) ([]api.NodeAddress, error) {
-	inst, err := gce.getInstanceByName(instance)
+	externalIP, err := gce.getExternalIP(instance)
 	if err != nil {
-		return nil, err
-	}
-	ip := net.ParseIP(inst.NetworkInterfaces[0].AccessConfigs[0].NatIP)
-	if ip == nil {
-		return nil, fmt.Errorf("invalid network IP: %s", inst.NetworkInterfaces[0].AccessConfigs[0].NatIP)
-	}
-
-	externalIP, err := gce.metadataAccess(EXTERNAL_IP_METADATA_URL)
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("couldn't get external IP for instance %s: %v", instance, err)
 	}
 
 	return []api.NodeAddress{
 		{Type: api.NodeExternalIP, Address: externalIP},
-		{Type: api.NodeLegacyHostIP, Address: ip.String()},
+		// TODO(mbforbes): Remove NodeLegacyHostIP once v1beta1 is removed.
+		{Type: api.NodeLegacyHostIP, Address: externalIP},
 	}, nil
+}
+
+func (gce *GCECloud) getExternalIP(instance string) (string, error) {
+	inst, err := gce.getInstanceByName(instance)
+	if err != nil {
+		return "", err
+	}
+	ip := net.ParseIP(inst.NetworkInterfaces[0].AccessConfigs[0].NatIP)
+	if ip == nil {
+		return "", fmt.Errorf("invalid network IP: %s", inst.NetworkInterfaces[0].AccessConfigs[0].NatIP)
+	}
+	return ip.String(), nil
 }
 
 // ExternalID returns the cloud provider ID of the specified instance.
@@ -352,32 +485,8 @@ func (gce *GCECloud) ExternalID(instance string) (string, error) {
 	return strconv.FormatUint(inst.Id, 10), nil
 }
 
-// fqdnSuffix is hacky function to compute the delta between hostame and hostname -f.
-func fqdnSuffix() (string, error) {
-	fullHostname, err := exec.Command("hostname", "-f").Output()
-	if err != nil {
-		return "", err
-	}
-	hostname, err := exec.Command("hostname").Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(fullHostname)[len(string(hostname)):]), nil
-}
-
 // List is an implementation of Instances.List.
 func (gce *GCECloud) List(filter string) ([]string, error) {
-	// GCE gives names without their fqdn suffix, so get that here for appending.
-	// This is needed because the kubelet looks for its jobs in /registry/hosts/<fqdn>/pods
-	// We should really just replace this convention, with a negotiated naming protocol for kubelet's
-	// to register with the master.
-	suffix, err := fqdnSuffix()
-	if err != nil {
-		return []string{}, err
-	}
-	if len(suffix) > 0 {
-		suffix = "." + suffix
-	}
 	listCall := gce.service.Instances.List(gce.projectID, gce.zone)
 	if len(filter) > 0 {
 		listCall = listCall.Filter("name eq " + filter)
@@ -388,7 +497,7 @@ func (gce *GCECloud) List(filter string) ([]string, error) {
 	}
 	var instances []string
 	for _, instance := range res.Items {
-		instances = append(instances, instance.Name+suffix)
+		instances = append(instances, instance.Name)
 	}
 	return instances, nil
 }
@@ -435,6 +544,46 @@ func (gce *GCECloud) GetNodeResources(name string) (*api.NodeResources, error) {
 		glog.Errorf("unknown machine: %s", res.MachineType)
 		return nil, nil
 	}
+}
+
+func getMetadataValue(metadata *compute.Metadata, key string) (string, bool) {
+	for _, item := range metadata.Items {
+		if item.Key == key {
+			return item.Value, true
+		}
+	}
+	return "", false
+}
+
+func (gce *GCECloud) Configure(name string, spec *api.NodeSpec) error {
+	instanceName := canonicalizeInstanceName(name)
+	insertOp, err := gce.service.Routes.Insert(gce.projectID, &compute.Route{
+		Name:            instanceName,
+		DestRange:       spec.PodCIDR,
+		NextHopInstance: fmt.Sprintf("zones/%s/instances/%s", gce.zone, instanceName),
+		Network:         fmt.Sprintf("global/networks/%s", gce.networkName),
+		Priority:        1000,
+	}).Do()
+	if err != nil {
+		return err
+	}
+	if err := gce.waitForGlobalOp(insertOp); err != nil {
+		if gapiErr, ok := err.(*googleapi.Error); ok && gapiErr.Code == http.StatusConflict {
+			// TODO (cjcullen): Make this actually check the route is correct.
+			return nil
+		}
+	}
+	return err
+}
+
+func (gce *GCECloud) Release(name string) error {
+	instanceName := canonicalizeInstanceName(name)
+	deleteCall := gce.service.Routes.Delete(gce.projectID, instanceName)
+	deleteOp, err := deleteCall.Do()
+	if err != nil {
+		return err
+	}
+	return gce.waitForGlobalOp(deleteOp)
 }
 
 func (gce *GCECloud) GetZone() (cloudprovider.Zone, error) {

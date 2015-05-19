@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,8 +21,9 @@ import (
 	"os/signal"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/portforward"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/cmd/util"
+	cmdutil "github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/cmd/util"
 	"github.com/golang/glog"
 	"github.com/spf13/cobra"
 )
@@ -42,30 +43,44 @@ $ kubectl port-forward -p mypod :5000
 $ kubectl port-forward -p mypod 0:5000`
 )
 
-func (f *Factory) NewCmdPortForward() *cobra.Command {
+func NewCmdPortForward(f *cmdutil.Factory) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "port-forward -p POD [LOCAL_PORT:]REMOTE_PORT [...[LOCAL_PORT_N:]REMOTE_PORT_N]",
 		Short:   "Forward one or more local ports to a pod.",
 		Long:    "Forward one or more local ports to a pod.",
 		Example: portforward_example,
 		Run: func(cmd *cobra.Command, args []string) {
-			err := RunPortForward(f, cmd, args)
-			util.CheckErr(err)
+			err := RunPortForward(f, cmd, args, &defaultPortForwarder{})
+			cmdutil.CheckErr(err)
 		},
 	}
 	cmd.Flags().StringP("pod", "p", "", "Pod name")
+	cmd.MarkFlagRequired("pod")
 	// TODO support UID
 	return cmd
 }
 
-func RunPortForward(f *Factory, cmd *cobra.Command, args []string) error {
-	podName := util.GetFlagString(cmd, "pod")
-	if len(podName) == 0 {
-		return util.UsageError(cmd, "POD is required for exec")
-	}
+type portForwarder interface {
+	ForwardPorts(req *client.Request, config *client.Config, ports []string, stopChan <-chan struct{}) error
+}
 
+type defaultPortForwarder struct{}
+
+func (*defaultPortForwarder) ForwardPorts(req *client.Request, config *client.Config, ports []string, stopChan <-chan struct{}) error {
+	fw, err := portforward.New(req, config, ports, stopChan)
+	if err != nil {
+		return err
+	}
+	return fw.ForwardPorts()
+}
+
+func RunPortForward(f *cmdutil.Factory, cmd *cobra.Command, args []string, fw portForwarder) error {
+	podName := cmdutil.GetFlagString(cmd, "pod")
+	if len(podName) == 0 {
+		return cmdutil.UsageError(cmd, "POD is required for exec")
+	}
 	if len(args) < 1 {
-		return util.UsageError(cmd, "at least 1 PORT is required for port-forward")
+		return cmdutil.UsageError(cmd, "at least 1 PORT is required for port-forward")
 	}
 
 	namespace, err := f.DefaultNamespace()
@@ -103,15 +118,10 @@ func RunPortForward(f *Factory, cmd *cobra.Command, args []string) error {
 	}()
 
 	req := client.RESTClient.Get().
-		Prefix("proxy").
-		Resource("minions").
-		Name(pod.Status.Host).
-		Suffix("portForward", namespace, podName)
+		Resource("pods").
+		Namespace(namespace).
+		Name(pod.Name).
+		SubResource("portforward")
 
-	pf, err := portforward.New(req, config, args, stopCh)
-	if err != nil {
-		return err
-	}
-
-	return pf.ForwardPorts()
+	return fw.ForwardPorts(req, config, args, stopCh)
 }

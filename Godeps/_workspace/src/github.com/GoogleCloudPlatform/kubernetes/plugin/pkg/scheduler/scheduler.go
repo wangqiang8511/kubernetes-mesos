@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,11 +17,13 @@ limitations under the License.
 package scheduler
 
 import (
+	"time"
+
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/record"
-	// TODO: move everything from pkg/scheduler into this package. Remove references from registry.
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/scheduler"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
+	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler/algorithm"
+	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler/metrics"
 
 	"github.com/golang/glog"
 )
@@ -44,6 +46,17 @@ type SystemModeler interface {
 	// The assumtion should last until the system confirms the
 	// assumtion or disconfirms it.
 	AssumePod(pod *api.Pod)
+	// ForgetPod removes a pod assumtion. (It won't make the model
+	// show the absence of the given pod if the pod is in the scheduled
+	// pods list!)
+	ForgetPod(pod *api.Pod)
+	ForgetPodByKey(key string)
+
+	// For serializing calls to Assume/ForgetPod: imagine you want to add
+	// a pod iff a bind succeeds, but also remove a pod if it is deleted.
+	// TODO: if SystemModeler begins modeling things other than pods, this
+	// should probably be parameterized or specialized for pods.
+	LockedAction(f func())
 }
 
 // Scheduler watches for new unscheduled pods. It attempts to find
@@ -56,8 +69,8 @@ type Config struct {
 	// It is expected that changes made via modeler will be observed
 	// by MinionLister and Algorithm.
 	Modeler      SystemModeler
-	MinionLister scheduler.MinionLister
-	Algorithm    scheduler.Scheduler
+	MinionLister algorithm.MinionLister
+	Algorithm    algorithm.ScheduleAlgorithm
 	Binder       Binder
 
 	// NextPod should be a function that blocks until the next pod
@@ -72,6 +85,9 @@ type Config struct {
 
 	// Recorder is the EventRecorder to use
 	Recorder record.EventRecorder
+
+	// Close this to shut down the scheduler.
+	StopEverything chan struct{}
 }
 
 // New returns a new scheduler.
@@ -79,23 +95,30 @@ func New(c *Config) *Scheduler {
 	s := &Scheduler{
 		config: c,
 	}
+	metrics.Register()
 	return s
 }
 
 // Run begins watching and scheduling. It starts a goroutine and returns immediately.
 func (s *Scheduler) Run() {
-	go util.Forever(s.scheduleOne, 0)
+	go util.Until(s.scheduleOne, 0, s.config.StopEverything)
 }
 
-func (s *Scheduler) scheduleOne() {
+func (s *Scheduler) schedule() (executeBinding func()) {
 	pod := s.config.NextPod()
 	glog.V(3).Infof("Attempting to schedule: %v", pod)
-	dest, err := s.config.Algorithm.Schedule(*pod, s.config.MinionLister)
+	start := time.Now()
+	recordTime := func() {
+		metrics.E2eSchedulingLatency.Observe(metrics.SinceInMicroseconds(start))
+	}
+	dest, err := s.config.Algorithm.Schedule(pod, s.config.MinionLister)
+	metrics.SchedulingAlgorithmLatency.Observe(metrics.SinceInMicroseconds(start))
 	if err != nil {
 		glog.V(1).Infof("Failed to schedule: %v", pod)
 		s.config.Recorder.Eventf(pod, "failedScheduling", "Error scheduling: %v", err)
 		s.config.Error(pod, err)
-		return
+		recordTime()
+		return func() {}
 	}
 	b := &api.Binding{
 		ObjectMeta: api.ObjectMeta{Namespace: pod.Namespace, Name: pod.Name},
@@ -104,16 +127,33 @@ func (s *Scheduler) scheduleOne() {
 			Name: dest,
 		},
 	}
-	if err := s.config.Binder.Bind(b); err != nil {
-		glog.V(1).Infof("Failed to bind pod: %v", err)
-		s.config.Recorder.Eventf(pod, "failedScheduling", "Binding rejected: %v", err)
-		s.config.Error(pod, err)
-		return
+
+	// Actually do the binding asynchronously with respect to the scheduling queue.
+	return func() {
+		defer recordTime()
+		defer util.HandleCrash()
+
+		// Make an object representing our assumtion that the bind will succeed.
+		assumed := *pod
+		assumed.Spec.Host = dest
+		s.config.Modeler.AssumePod(&assumed)
+
+		bindingStart := time.Now()
+		err := s.config.Binder.Bind(b)
+		metrics.BindingLatency.Observe(metrics.SinceInMicroseconds(bindingStart))
+		if err != nil {
+			// Remove our (now invalid) assumption
+			s.config.Modeler.ForgetPod(&assumed)
+			glog.V(1).Infof("Failed to bind pod: %v", err)
+			s.config.Recorder.Eventf(pod, "failedScheduling", "Binding rejected: %v", err)
+			s.config.Error(pod, err)
+			return
+		}
+		s.config.Recorder.Eventf(pod, "scheduled", "Successfully assigned %v to %v", pod.Name, dest)
 	}
-	s.config.Recorder.Eventf(pod, "scheduled", "Successfully assigned %v to %v", pod.Name, dest)
-	// tell the model to assume that this binding took effect.
-	assumed := *pod
-	assumed.Spec.Host = dest
-	assumed.Status.Host = dest
-	s.config.Modeler.AssumePod(&assumed)
+}
+
+func (s *Scheduler) scheduleOne() {
+	bind := s.schedule()
+	go bind()
 }

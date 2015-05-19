@@ -1,5 +1,5 @@
 /*
-Copyright 2015 Google Inc. All rights reserved.
+Copyright 2015 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@ limitations under the License.
 package cache
 
 import (
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/fields"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
@@ -41,10 +40,20 @@ type ListWatch struct {
 // NewListWatchFromClient creates a new ListWatch from the specified client, resource, namespace and field selector.
 func NewListWatchFromClient(c *client.Client, resource string, namespace string, fieldSelector fields.Selector) *ListWatch {
 	listFunc := func() (runtime.Object, error) {
-		return c.Get().Namespace(namespace).Resource(resource).FieldsSelectorParam(api.FieldSelectorQueryParam(c.APIVersion()), fieldSelector).Do().Get()
+		return c.Get().
+			Namespace(namespace).
+			Resource(resource).
+			FieldsSelectorParam(fieldSelector).
+			Do().
+			Get()
 	}
 	watchFunc := func(resourceVersion string) (watch.Interface, error) {
-		return c.Get().Prefix("watch").Namespace(namespace).Resource(resource).FieldsSelectorParam(api.FieldSelectorQueryParam(c.APIVersion()), fieldSelector).Param("resourceVersion", resourceVersion).Watch()
+		return c.Get().
+			Prefix("watch").
+			Namespace(namespace).
+			Resource(resource).
+			FieldsSelectorParam(fieldSelector).
+			Param("resourceVersion", resourceVersion).Watch()
 	}
 	return &ListWatch{ListFunc: listFunc, WatchFunc: watchFunc}
 }

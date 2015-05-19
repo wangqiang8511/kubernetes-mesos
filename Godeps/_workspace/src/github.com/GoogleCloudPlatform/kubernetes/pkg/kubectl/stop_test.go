@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,19 +23,18 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/testclient"
 )
 
 func TestReplicationControllerStop(t *testing.T) {
-	fake := &client.Fake{
-		Ctrl: api.ReplicationController{
-			Spec: api.ReplicationControllerSpec{
-				Replicas: 0,
-			},
+	fake := testclient.NewSimpleFake(&api.ReplicationController{
+		Spec: api.ReplicationControllerSpec{
+			Replicas: 0,
 		},
-	}
+	})
 	reaper := ReplicationControllerReaper{fake, time.Millisecond, time.Millisecond}
 	name := "foo"
-	s, err := reaper.Stop("default", name)
+	s, err := reaper.Stop("default", name, nil)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -43,18 +42,18 @@ func TestReplicationControllerStop(t *testing.T) {
 	if s != expected {
 		t.Errorf("expected %s, got %s", expected, s)
 	}
-	if len(fake.Actions) != 5 {
+	if len(fake.Actions) != 4 {
 		t.Errorf("unexpected actions: %v, expected 4 actions (get, update, get, delete)", fake.Actions)
 	}
-	for i, action := range []string{"get", "get", "update", "get", "delete"} {
-		if fake.Actions[i].Action != action+"-controller" {
-			t.Errorf("unexpected action: %v, expected %s-controller", fake.Actions[i], action)
+	for i, action := range []string{"get", "update", "get", "delete"} {
+		if fake.Actions[i].Action != action+"-replicationController" {
+			t.Errorf("unexpected action: %v, expected %s-replicationController", fake.Actions[i], action)
 		}
 	}
 }
 
 type noSuchPod struct {
-	*client.FakePods
+	*testclient.FakePods
 }
 
 func (c *noSuchPod) Get(name string) (*api.Pod, error) {
@@ -62,7 +61,7 @@ func (c *noSuchPod) Get(name string) (*api.Pod, error) {
 }
 
 type noDeleteService struct {
-	*client.FakeServices
+	*testclient.FakeServices
 }
 
 func (c *noDeleteService) Delete(service string) error {
@@ -70,12 +69,12 @@ func (c *noDeleteService) Delete(service string) error {
 }
 
 type reaperFake struct {
-	*client.Fake
+	*testclient.Fake
 	noSuchPod, noDeleteService bool
 }
 
 func (c *reaperFake) Pods(namespace string) client.PodInterface {
-	pods := &client.FakePods{c.Fake, namespace}
+	pods := &testclient.FakePods{c.Fake, namespace}
 	if c.noSuchPod {
 		return &noSuchPod{pods}
 	}
@@ -83,7 +82,7 @@ func (c *reaperFake) Pods(namespace string) client.PodInterface {
 }
 
 func (c *reaperFake) Services(namespace string) client.ServiceInterface {
-	services := &client.FakeServices{c.Fake, namespace}
+	services := &testclient.FakeServices{c.Fake, namespace}
 	if c.noDeleteService {
 		return &noDeleteService{services}
 	}
@@ -100,7 +99,7 @@ func TestSimpleStop(t *testing.T) {
 	}{
 		{
 			fake: &reaperFake{
-				Fake: &client.Fake{},
+				Fake: &testclient.Fake{},
 			},
 			kind:        "Pod",
 			actions:     []string{"get-pod", "delete-pod"},
@@ -109,7 +108,7 @@ func TestSimpleStop(t *testing.T) {
 		},
 		{
 			fake: &reaperFake{
-				Fake: &client.Fake{},
+				Fake: &testclient.Fake{},
 			},
 			kind:        "Service",
 			actions:     []string{"get-service", "delete-service"},
@@ -118,7 +117,7 @@ func TestSimpleStop(t *testing.T) {
 		},
 		{
 			fake: &reaperFake{
-				Fake:      &client.Fake{},
+				Fake:      &testclient.Fake{},
 				noSuchPod: true,
 			},
 			kind:        "Pod",
@@ -128,7 +127,7 @@ func TestSimpleStop(t *testing.T) {
 		},
 		{
 			fake: &reaperFake{
-				Fake:            &client.Fake{},
+				Fake:            &testclient.Fake{},
 				noDeleteService: true,
 			},
 			kind:        "Service",
@@ -143,7 +142,7 @@ func TestSimpleStop(t *testing.T) {
 		if err != nil {
 			t.Errorf("unexpected error: %v (%s)", err, test.test)
 		}
-		s, err := reaper.Stop("default", "foo")
+		s, err := reaper.Stop("default", "foo", nil)
 		if err != nil && !test.expectError {
 			t.Errorf("unexpected error: %v (%s)", err, test.test)
 		}

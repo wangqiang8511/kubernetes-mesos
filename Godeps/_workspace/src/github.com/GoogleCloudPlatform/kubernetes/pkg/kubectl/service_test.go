@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -46,9 +46,14 @@ func TestGenerateService(t *testing.T) {
 						"foo": "bar",
 						"baz": "blah",
 					},
-					Port:       80,
-					Protocol:   "TCP",
-					TargetPort: util.NewIntOrStringFromInt(1234),
+					Ports: []api.ServicePort{
+						{
+							Name:       "default",
+							Port:       80,
+							Protocol:   "TCP",
+							TargetPort: util.NewIntOrStringFromInt(1234),
+						},
+					},
 				},
 			},
 		},
@@ -69,9 +74,14 @@ func TestGenerateService(t *testing.T) {
 						"foo": "bar",
 						"baz": "blah",
 					},
-					Port:       80,
-					Protocol:   "UDP",
-					TargetPort: util.NewIntOrStringFromString("foobar"),
+					Ports: []api.ServicePort{
+						{
+							Name:       "default",
+							Port:       80,
+							Protocol:   "UDP",
+							TargetPort: util.NewIntOrStringFromString("foobar"),
+						},
+					},
 				},
 			},
 		},
@@ -97,9 +107,14 @@ func TestGenerateService(t *testing.T) {
 						"foo": "bar",
 						"baz": "blah",
 					},
-					Port:       80,
-					Protocol:   "TCP",
-					TargetPort: util.NewIntOrStringFromInt(1234),
+					Ports: []api.ServicePort{
+						{
+							Name:       "default",
+							Port:       80,
+							Protocol:   "TCP",
+							TargetPort: util.NewIntOrStringFromInt(1234),
+						},
+					},
 				},
 			},
 		},
@@ -121,10 +136,15 @@ func TestGenerateService(t *testing.T) {
 						"foo": "bar",
 						"baz": "blah",
 					},
-					Port:       80,
-					Protocol:   "UDP",
-					PublicIPs:  []string{"1.2.3.4"},
-					TargetPort: util.NewIntOrStringFromString("foobar"),
+					Ports: []api.ServicePort{
+						{
+							Name:       "default",
+							Port:       80,
+							Protocol:   "UDP",
+							TargetPort: util.NewIntOrStringFromString("foobar"),
+						},
+					},
+					PublicIPs: []string{"1.2.3.4"},
 				},
 			},
 		},
@@ -147,10 +167,15 @@ func TestGenerateService(t *testing.T) {
 						"foo": "bar",
 						"baz": "blah",
 					},
-					Port:                       80,
-					Protocol:                   "UDP",
+					Ports: []api.ServicePort{
+						{
+							Name:       "default",
+							Port:       80,
+							Protocol:   "UDP",
+							TargetPort: util.NewIntOrStringFromString("foobar"),
+						},
+					},
 					PublicIPs:                  []string{"1.2.3.4"},
-					TargetPort:                 util.NewIntOrStringFromString("foobar"),
 					CreateExternalLoadBalancer: true,
 				},
 			},

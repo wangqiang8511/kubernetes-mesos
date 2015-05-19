@@ -1,5 +1,5 @@
 /*
-Copyright 2015 Google Inc. All rights reserved.
+Copyright 2015 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/testclient"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/types"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/mount"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/volume"
@@ -38,7 +39,7 @@ func newTestHost(t *testing.T, client client.Interface) volume.VolumeHost {
 		t.Fatalf("can't make a temp rootdir: %v", err)
 	}
 
-	return volume.NewFakeVolumeHost(tempDir, client, empty_dir.ProbeVolumePluginsWithMounter(&mount.FakeMounter{}))
+	return volume.NewFakeVolumeHost(tempDir, client, empty_dir.ProbeVolumePlugins())
 }
 
 func TestCanSupport(t *testing.T) {
@@ -52,14 +53,14 @@ func TestCanSupport(t *testing.T) {
 	if plugin.Name() != secretPluginName {
 		t.Errorf("Wrong name: %s", plugin.Name())
 	}
-	if !plugin.CanSupport(&api.Volume{VolumeSource: api.VolumeSource{Secret: &api.SecretVolumeSource{SecretName: ""}}}) {
+	if !plugin.CanSupport(&volume.Spec{Name: "foo", VolumeSource: api.VolumeSource{Secret: &api.SecretVolumeSource{SecretName: ""}}}) {
 		t.Errorf("Expected true")
 	}
 }
 
 func TestPlugin(t *testing.T) {
 	var (
-		testPodUID     = "test_pod_uid"
+		testPodUID     = types.UID("test_pod_uid")
 		testVolumeName = "test_volume_name"
 		testNamespace  = "test_secret_namespace"
 		testName       = "test_secret_name"
@@ -86,9 +87,7 @@ func TestPlugin(t *testing.T) {
 		},
 	}
 
-	client := &client.Fake{
-		Secret: secret,
-	}
+	client := testclient.NewSimpleFake(&secret)
 
 	pluginMgr := volume.VolumePluginMgr{}
 	pluginMgr.InitPlugins(ProbeVolumePlugins(), newTestHost(t, client))
@@ -98,12 +97,13 @@ func TestPlugin(t *testing.T) {
 		t.Errorf("Can't find the plugin by name")
 	}
 
-	builder, err := plugin.NewBuilder(volumeSpec, &api.ObjectReference{UID: types.UID(testPodUID)})
+	pod := &api.Pod{ObjectMeta: api.ObjectMeta{UID: testPodUID}}
+	builder, err := plugin.NewBuilder(volume.NewSpecFromVolume(volumeSpec), pod, volume.VolumeOptions{}, &mount.FakeMounter{})
 	if err != nil {
 		t.Errorf("Failed to make a new Builder: %v", err)
 	}
 	if builder == nil {
-		t.Errorf("Got a nil Builder: %v")
+		t.Errorf("Got a nil Builder")
 	}
 
 	volumePath := builder.GetPath()
@@ -140,12 +140,12 @@ func TestPlugin(t *testing.T) {
 		}
 	}
 
-	cleaner, err := plugin.NewCleaner(testVolumeName, types.UID(testPodUID))
+	cleaner, err := plugin.NewCleaner(testVolumeName, testPodUID, mount.New())
 	if err != nil {
 		t.Errorf("Failed to make a new Cleaner: %v", err)
 	}
 	if cleaner == nil {
-		t.Errorf("Got a nil Cleaner: %v")
+		t.Errorf("Got a nil Cleaner")
 	}
 
 	if err := cleaner.TearDown(); err != nil {

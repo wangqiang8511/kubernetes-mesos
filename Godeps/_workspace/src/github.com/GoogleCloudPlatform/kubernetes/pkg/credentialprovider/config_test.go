@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -163,6 +163,36 @@ func TestDecodeDockerConfigFieldAuth(t *testing.T) {
 
 		if tt.password != password {
 			t.Errorf("case %d: expected password %q, got %q", i, tt.password, password)
+		}
+	}
+}
+
+func TestDockerConfigEntryJSONCompatibleEncode(t *testing.T) {
+	tests := []struct {
+		input  DockerConfigEntry
+		expect []byte
+	}{
+		// simple case, just decode the fields
+		{
+			expect: []byte(`{"username":"foo","password":"bar","email":"foo@example.com","auth":"Zm9vOmJhcg=="}`),
+			input: DockerConfigEntry{
+				Username: "foo",
+				Password: "bar",
+				Email:    "foo@example.com",
+			},
+		},
+	}
+
+	for i, tt := range tests {
+		toEncode := tt.input.ConvertToDockerConfigCompatible()
+
+		actual, err := json.Marshal(toEncode)
+		if err != nil {
+			t.Errorf("case %d: unexpected error: %v", i, err)
+		}
+
+		if string(tt.expect) != string(actual) {
+			t.Errorf("case %d: expected %v, got %v", i, string(tt.expect), string(actual))
 		}
 	}
 }

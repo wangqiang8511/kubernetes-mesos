@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,9 +20,11 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/meta"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/cmd/util"
+	cmdutil "github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/cmd/util"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/resource"
+
 	"github.com/spf13/cobra"
 )
 
@@ -30,19 +32,20 @@ const (
 	expose_long = `Take a replicated application and expose it as Kubernetes Service.
 
 Looks up a replication controller or service by name and uses the selector for that resource as the
-selector for a new Service on the specified port.`
+selector for a new Service on the specified port. If no labels are specified, the new service will
+re-use the labels from the resource it exposes.`
 
 	expose_example = `// Creates a service for a replicated nginx, which serves on port 80 and connects to the containers on port 8000.
-$ kubectl expose nginx --port=80 --target-port=8000
+$ kubectl expose rc nginx --port=80 --target-port=8000
 
 // Creates a second service based on the above service, exposing the container port 8443 as port 443 with the name "nginx-https"
 $ kubectl expose service nginx --port=443 --target-port=8443 --service-name=nginx-https
 
 // Create a service for a replicated streaming application on port 4100 balancing UDP traffic and named 'video-stream'.
-$ kubectl expose streamer --port=4100 --protocol=udp --service-name=video-stream`
+$ kubectl expose rc streamer --port=4100 --protocol=udp --service-name=video-stream`
 )
 
-func (f *Factory) NewCmdExposeService(out io.Writer) *cobra.Command {
+func NewCmdExposeService(f *cmdutil.Factory, out io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "expose RESOURCE NAME --port=port [--protocol=TCP|UDP] [--target-port=number-or-name] [--service-name=name] [--public-ip=ip] [--create-external-load-balancer=bool]",
 		Short:   "Take a replicated application and expose it as Kubernetes Service",
@@ -50,13 +53,14 @@ func (f *Factory) NewCmdExposeService(out io.Writer) *cobra.Command {
 		Example: expose_example,
 		Run: func(cmd *cobra.Command, args []string) {
 			err := RunExpose(f, out, cmd, args)
-			util.CheckErr(err)
+			cmdutil.CheckErr(err)
 		},
 	}
-	util.AddPrinterFlags(cmd)
+	cmdutil.AddPrinterFlags(cmd)
 	cmd.Flags().String("generator", "service/v1", "The name of the API generator to use.  Default is 'service/v1'.")
 	cmd.Flags().String("protocol", "TCP", "The network protocol for the service to be created. Default is 'tcp'.")
 	cmd.Flags().Int("port", -1, "The port that the service should serve on. Required.")
+	cmd.MarkFlagRequired("port")
 	cmd.Flags().Bool("create-external-load-balancer", false, "If true, create an external load balancer for this service. Implementation is cloud provider dependent. Default is 'false'.")
 	cmd.Flags().String("selector", "", "A label selector to use for this service. If empty (the default) infer the selector from the replication controller.")
 	cmd.Flags().StringP("labels", "l", "", "Labels to apply to the service created by this call.")
@@ -69,85 +73,127 @@ func (f *Factory) NewCmdExposeService(out io.Writer) *cobra.Command {
 	return cmd
 }
 
-func RunExpose(f *Factory, out io.Writer, cmd *cobra.Command, args []string) error {
-	var name, resource string
+func RunExpose(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []string) error {
+	var name, res string
 	switch l := len(args); {
 	case l == 2:
-		resource, name = args[0], args[1]
+		res, name = args[0], args[1]
 	default:
-		return util.UsageError(cmd, "the type and name of a resource to expose are required arguments")
+		return cmdutil.UsageError(cmd, "the type and name of a resource to expose are required arguments")
 	}
 
 	namespace, err := f.DefaultNamespace()
 	if err != nil {
 		return err
 	}
-	client, err := f.Client()
+
+	// Get the input object
+	var mapping *meta.RESTMapping
+	mapper, typer := f.Object()
+	v, k, err := mapper.VersionAndKindForResource(res)
+	if err != nil {
+		return err
+	}
+	mapping, err = mapper.RESTMapping(k, v)
+	if err != nil {
+		return err
+	}
+	client, err := f.RESTClient(mapping)
+	if err != nil {
+		return err
+	}
+	inputObject, err := resource.NewHelper(client, mapping).Get(namespace, name)
 	if err != nil {
 		return err
 	}
 
-	generatorName := util.GetFlagString(cmd, "generator")
-
-	generator, found := kubectl.Generators[generatorName]
+	// Get the generator, setup and validate all required parameters
+	generatorName := cmdutil.GetFlagString(cmd, "generator")
+	generator, found := f.Generator(generatorName)
 	if !found {
-		return util.UsageError(cmd, fmt.Sprintf("generator %q not found.", generator))
-	}
-	if util.GetFlagInt(cmd, "port") < 1 {
-		return util.UsageError(cmd, "--port is required and must be a positive integer.")
+		return cmdutil.UsageError(cmd, fmt.Sprintf("generator %q not found.", generator))
 	}
 	names := generator.ParamNames()
 	params := kubectl.MakeParams(cmd, names)
-	if len(util.GetFlagString(cmd, "service-name")) == 0 {
+	if len(cmdutil.GetFlagString(cmd, "service-name")) == 0 {
 		params["name"] = name
 	} else {
-		params["name"] = util.GetFlagString(cmd, "service-name")
+		params["name"] = cmdutil.GetFlagString(cmd, "service-name")
 	}
-	if s, found := params["selector"]; !found || len(s) == 0 {
-		mapper, _ := f.Object()
-		v, k, err := mapper.VersionAndKindForResource(resource)
-		if err != nil {
-			return err
+	if s, found := params["selector"]; !found || len(s) == 0 || cmdutil.GetFlagInt(cmd, "port") < 1 {
+		if len(s) == 0 {
+			s, err := f.PodSelectorForObject(inputObject)
+			if err != nil {
+				return err
+			}
+			params["selector"] = s
 		}
-		mapping, err := mapper.RESTMapping(k, v)
-		if err != nil {
-			return err
+		noPorts := true
+		for _, param := range names {
+			if param.Name == "port" {
+				noPorts = false
+				break
+			}
 		}
-		s, err := f.PodSelectorForResource(mapping, namespace, name)
-		if err != nil {
-			return err
+		if cmdutil.GetFlagInt(cmd, "port") < 0 && !noPorts {
+			ports, err := f.PortsForObject(inputObject)
+			if err != nil {
+				return err
+			}
+			if len(ports) == 0 {
+				return cmdutil.UsageError(cmd, "couldn't find a suitable port via --port flag or introspection")
+			}
+			if len(ports) > 1 {
+				return cmdutil.UsageError(cmd, "more than one port to choose from, please explicitly specify a port using the --port flag.")
+			}
+			params["port"] = ports[0]
 		}
-		params["selector"] = s
 	}
-	if util.GetFlagBool(cmd, "create-external-load-balancer") {
+	if cmdutil.GetFlagBool(cmd, "create-external-load-balancer") {
 		params["create-external-load-balancer"] = "true"
 	}
-
+	if len(params["labels"]) == 0 {
+		labels, err := f.LabelsForObject(inputObject)
+		if err != nil {
+			return err
+		}
+		params["labels"] = kubectl.MakeLabels(labels)
+	}
 	err = kubectl.ValidateParams(names, params)
 	if err != nil {
 		return err
 	}
 
-	service, err := generator.Generate(params)
+	// Expose new object
+	object, err := generator.Generate(params)
 	if err != nil {
 		return err
 	}
 
-	inline := util.GetFlagString(cmd, "overrides")
+	inline := cmdutil.GetFlagString(cmd, "overrides")
 	if len(inline) > 0 {
-		service, err = util.Merge(service, inline, "Service")
+		object, err = cmdutil.Merge(object, inline, mapping.Kind)
 		if err != nil {
 			return err
 		}
 	}
 
 	// TODO: extract this flag to a central location, when such a location exists.
-	if !util.GetFlagBool(cmd, "dry-run") {
-		service, err = client.Services(namespace).Create(service.(*api.Service))
+	if !cmdutil.GetFlagBool(cmd, "dry-run") {
+		resourceMapper := &resource.Mapper{typer, mapper, f.ClientMapperForCommand()}
+		info, err := resourceMapper.InfoForObject(object)
+		if err != nil {
+			return err
+		}
+		data, err := info.Mapping.Codec.Encode(object)
+		if err != nil {
+			return err
+		}
+		_, err = resource.NewHelper(info.Client, info.Mapping).Create(namespace, false, data)
 		if err != nil {
 			return err
 		}
 	}
 
-	return f.PrintObject(cmd, service, out)
+	return f.PrintObject(cmd, object, out)
 }

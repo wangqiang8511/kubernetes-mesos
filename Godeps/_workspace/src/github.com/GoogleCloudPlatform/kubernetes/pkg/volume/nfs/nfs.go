@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,23 +17,24 @@ limitations under the License.
 package nfs
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/types"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/mount"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/volume"
 	"github.com/golang/glog"
 )
 
 // This is the primary entrypoint for volume plugins.
 func ProbeVolumePlugins() []volume.VolumePlugin {
-	return []volume.VolumePlugin{&nfsPlugin{nil, newNFSMounter()}}
+	return []volume.VolumePlugin{&nfsPlugin{nil}}
 }
 
 type nfsPlugin struct {
-	host    volume.VolumeHost
-	mounter nfsMountInterface
+	host volume.VolumeHost
 }
 
 var _ volume.VolumePlugin = &nfsPlugin{}
@@ -50,49 +51,46 @@ func (plugin *nfsPlugin) Name() string {
 	return nfsPluginName
 }
 
-func (plugin *nfsPlugin) CanSupport(spec *api.Volume) bool {
-	if spec.VolumeSource.NFS != nil {
-		return true
-	}
-	return false
+func (plugin *nfsPlugin) CanSupport(spec *volume.Spec) bool {
+	return spec.VolumeSource.NFS != nil
 }
 
-func (plugin *nfsPlugin) GetAccessModes() []api.AccessModeType {
-	return []api.AccessModeType{
+func (plugin *nfsPlugin) GetAccessModes() []api.PersistentVolumeAccessMode {
+	return []api.PersistentVolumeAccessMode{
 		api.ReadWriteOnce,
 		api.ReadOnlyMany,
 		api.ReadWriteMany,
 	}
 }
 
-func (plugin *nfsPlugin) NewBuilder(spec *api.Volume, podRef *api.ObjectReference) (volume.Builder, error) {
-	return plugin.newBuilderInternal(spec, podRef, plugin.mounter)
+func (plugin *nfsPlugin) NewBuilder(spec *volume.Spec, pod *api.Pod, _ volume.VolumeOptions, mounter mount.Interface) (volume.Builder, error) {
+	return plugin.newBuilderInternal(spec, pod, mounter)
 }
 
-func (plugin *nfsPlugin) newBuilderInternal(spec *api.Volume, podRef *api.ObjectReference, mounter nfsMountInterface) (volume.Builder, error) {
+func (plugin *nfsPlugin) newBuilderInternal(spec *volume.Spec, pod *api.Pod, mounter mount.Interface) (volume.Builder, error) {
 	return &nfs{
 		volName:    spec.Name,
 		server:     spec.VolumeSource.NFS.Server,
 		exportPath: spec.VolumeSource.NFS.Path,
 		readOnly:   spec.VolumeSource.NFS.ReadOnly,
 		mounter:    mounter,
-		podRef:     podRef,
+		pod:        pod,
 		plugin:     plugin,
 	}, nil
 }
 
-func (plugin *nfsPlugin) NewCleaner(volName string, podUID types.UID) (volume.Cleaner, error) {
-	return plugin.newCleanerInternal(volName, podUID, plugin.mounter)
+func (plugin *nfsPlugin) NewCleaner(volName string, podUID types.UID, mounter mount.Interface) (volume.Cleaner, error) {
+	return plugin.newCleanerInternal(volName, podUID, mounter)
 }
 
-func (plugin *nfsPlugin) newCleanerInternal(volName string, podUID types.UID, mounter nfsMountInterface) (volume.Cleaner, error) {
+func (plugin *nfsPlugin) newCleanerInternal(volName string, podUID types.UID, mounter mount.Interface) (volume.Cleaner, error) {
 	return &nfs{
 		volName:    volName,
 		server:     "",
 		exportPath: "",
 		readOnly:   false,
 		mounter:    mounter,
-		podRef:     &api.ObjectReference{UID: podUID},
+		pod:        &api.Pod{ObjectMeta: api.ObjectMeta{UID: podUID}},
 		plugin:     plugin,
 	}, nil
 }
@@ -100,11 +98,11 @@ func (plugin *nfsPlugin) newCleanerInternal(volName string, podUID types.UID, mo
 // NFS volumes represent a bare host file or directory mount of an NFS export.
 type nfs struct {
 	volName    string
-	podRef     *api.ObjectReference
+	pod        *api.Pod
 	server     string
 	exportPath string
 	readOnly   bool
-	mounter    nfsMountInterface
+	mounter    mount.Interface
 	plugin     *nfsPlugin
 }
 
@@ -122,9 +120,13 @@ func (nfsVolume *nfs) SetUpAt(dir string) error {
 	if mountpoint {
 		return nil
 	}
-	exportDir := nfsVolume.exportPath
 	os.MkdirAll(dir, 0750)
-	err = nfsVolume.mounter.Mount(nfsVolume.server, exportDir, dir, nfsVolume.readOnly)
+	source := fmt.Sprintf("%s:%s", nfsVolume.server, nfsVolume.exportPath)
+	options := []string{}
+	if nfsVolume.readOnly {
+		options = append(options, "ro")
+	}
+	err = nfsVolume.mounter.Mount(source, dir, "nfs", options)
 	if err != nil {
 		mountpoint, mntErr := nfsVolume.mounter.IsMountPoint(dir)
 		if mntErr != nil {
@@ -155,7 +157,7 @@ func (nfsVolume *nfs) SetUpAt(dir string) error {
 
 func (nfsVolume *nfs) GetPath() string {
 	name := nfsPluginName
-	return nfsVolume.plugin.host.GetPodVolumeDir(nfsVolume.podRef.UID, util.EscapeQualifiedNameForDisk(name), nfsVolume.volName)
+	return nfsVolume.plugin.host.GetPodVolumeDir(nfsVolume.pod.UID, util.EscapeQualifiedNameForDisk(name), nfsVolume.volName)
 }
 
 func (nfsVolume *nfs) TearDown() error {

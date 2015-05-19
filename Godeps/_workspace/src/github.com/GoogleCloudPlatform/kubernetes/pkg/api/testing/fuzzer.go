@@ -1,5 +1,5 @@
 /*
-Copyright 2015 Google Inc. All rights reserved.
+Copyright 2015 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package testing
 
 import (
 	"math/rand"
+	"reflect"
 	"strconv"
 	"testing"
 
@@ -33,13 +34,6 @@ import (
 
 	"speter.net/go/exp/math/dec/inf"
 )
-
-func fuzzOneOf(c fuzz.Continue, objs ...interface{}) {
-	// Use a new fuzzer which cannot populate nil to ensure one obj will be set.
-	f := fuzz.New().NilChance(0).NumElements(1, 1)
-	i := c.RandUint64() % uint64(len(objs))
-	f.Fuzz(objs[i])
-}
 
 // FuzzerFor can randomly populate api objects that are destined for version.
 func FuzzerFor(t *testing.T, version string, src rand.Source) *fuzz.Fuzzer {
@@ -121,12 +115,14 @@ func FuzzerFor(t *testing.T, version string, src rand.Source) *fuzz.Fuzzer {
 		},
 		func(j *api.List, c fuzz.Continue) {
 			c.FuzzNoCustom(j) // fuzz self without calling this function again
-			if j.Items == nil {
+			// TODO: uncomment when round trip starts from a versioned object
+			if false { //j.Items == nil {
 				j.Items = []runtime.Object{}
 			}
 		},
 		func(j *runtime.Object, c fuzz.Continue) {
-			if c.RandBool() {
+			// TODO: uncomment when round trip starts from a versioned object
+			if true { //c.RandBool() {
 				*j = &runtime.Unknown{
 					TypeMeta: runtime.TypeMeta{Kind: "Something", APIVersion: "unknown"},
 					RawJSON:  []byte(`{"apiVersion":"unknown","kind":"Something","someKey":"someValue"}`),
@@ -171,9 +167,12 @@ func FuzzerFor(t *testing.T, version string, src rand.Source) *fuzz.Fuzzer {
 			*rp = policies[c.Rand.Intn(len(policies))]
 		},
 		func(vs *api.VolumeSource, c fuzz.Continue) {
-			// Exactly one of the fields should be set.
-			//FIXME: the fuzz can still end up nil.  What if fuzz allowed me to say that?
-			fuzzOneOf(c, &vs.HostPath, &vs.EmptyDir, &vs.GCEPersistentDisk, &vs.GitRepo, &vs.Secret, &vs.NFS)
+			// Exactly one of the fields must be set.
+			v := reflect.ValueOf(vs).Elem()
+			i := int(c.RandUint64() % uint64(v.NumField()))
+			v = v.Field(i).Addr()
+			// Use a new fuzzer which cannot populate nil to ensure one field will be set.
+			fuzz.New().NilChance(0).NumElements(1, 1).Fuzz(v.Interface())
 		},
 		func(d *api.DNSPolicy, c fuzz.Continue) {
 			policies := []api.DNSPolicy{api.DNSClusterFirst, api.DNSDefault}
@@ -183,13 +182,38 @@ func FuzzerFor(t *testing.T, version string, src rand.Source) *fuzz.Fuzzer {
 			protocols := []api.Protocol{api.ProtocolTCP, api.ProtocolUDP}
 			*p = protocols[c.Rand.Intn(len(protocols))]
 		},
-		func(p *api.AffinityType, c fuzz.Continue) {
-			types := []api.AffinityType{api.AffinityTypeClientIP, api.AffinityTypeNone}
+		func(p *api.ServiceAffinity, c fuzz.Continue) {
+			types := []api.ServiceAffinity{api.ServiceAffinityClientIP, api.ServiceAffinityNone}
 			*p = types[c.Rand.Intn(len(types))]
 		},
 		func(ct *api.Container, c fuzz.Continue) {
 			c.FuzzNoCustom(ct)                                          // fuzz self without calling this function again
 			ct.TerminationMessagePath = "/" + ct.TerminationMessagePath // Must be non-empty
+		},
+		func(ev *api.EnvVar, c fuzz.Continue) {
+			ev.Name = c.RandString()
+			if c.RandBool() {
+				ev.Value = c.RandString()
+			} else {
+				ev.ValueFrom = &api.EnvVarSource{}
+				ev.ValueFrom.FieldRef = &api.ObjectFieldSelector{}
+
+				versions := []string{"v1beta1", "v1beta2", "v1beta3"}
+
+				ev.ValueFrom.FieldRef.APIVersion = versions[c.Rand.Intn(len(versions))]
+				ev.ValueFrom.FieldRef.FieldPath = c.RandString()
+			}
+		},
+		func(sc *api.SecurityContext, c fuzz.Continue) {
+			c.FuzzNoCustom(sc) // fuzz self without calling this function again
+			priv := c.RandBool()
+			sc.Privileged = &priv
+			sc.Capabilities = &api.Capabilities{
+				Add:  make([]api.Capability, 0),
+				Drop: make([]api.Capability, 0),
+			}
+			c.Fuzz(&sc.Capabilities.Add)
+			c.Fuzz(&sc.Capabilities.Drop)
 		},
 		func(e *api.Event, c fuzz.Continue) {
 			c.FuzzNoCustom(e) // fuzz self without calling this function again
@@ -204,6 +228,16 @@ func FuzzerFor(t *testing.T, version string, src rand.Source) *fuzz.Fuzzer {
 			c.FuzzNoCustom(s) // fuzz self without calling this function again
 			s.Type = api.SecretTypeOpaque
 		},
+		func(pv *api.PersistentVolume, c fuzz.Continue) {
+			c.FuzzNoCustom(pv) // fuzz self without calling this function again
+			types := []api.PersistentVolumePhase{api.VolumePending, api.VolumeBound, api.VolumeReleased, api.VolumeAvailable}
+			pv.Status.Phase = types[c.Rand.Intn(len(types))]
+		},
+		func(pvc *api.PersistentVolumeClaim, c fuzz.Continue) {
+			c.FuzzNoCustom(pvc) // fuzz self without calling this function again
+			types := []api.PersistentVolumeClaimPhase{api.ClaimBound, api.ClaimPending}
+			pvc.Status.Phase = types[c.Rand.Intn(len(types))]
+		},
 		func(s *api.NamespaceSpec, c fuzz.Continue) {
 			s.Finalizers = []api.FinalizerName{api.FinalizerKubernetes}
 		},
@@ -216,12 +250,23 @@ func FuzzerFor(t *testing.T, version string, src rand.Source) *fuzz.Fuzzer {
 		},
 		func(ss *api.ServiceSpec, c fuzz.Continue) {
 			c.FuzzNoCustom(ss) // fuzz self without calling this function again
-			switch ss.TargetPort.Kind {
-			case util.IntstrInt:
-				ss.TargetPort.IntVal = 1 + ss.TargetPort.IntVal%65535 // non-zero
-			case util.IntstrString:
-				ss.TargetPort.StrVal = "x" + ss.TargetPort.StrVal // non-empty
+			if len(ss.Ports) == 0 {
+				// There must be at least 1 port.
+				ss.Ports = append(ss.Ports, api.ServicePort{})
+				c.Fuzz(&ss.Ports[0])
 			}
+			for i := range ss.Ports {
+				switch ss.Ports[i].TargetPort.Kind {
+				case util.IntstrInt:
+					ss.Ports[i].TargetPort.IntVal = 1 + ss.Ports[i].TargetPort.IntVal%65535 // non-zero
+				case util.IntstrString:
+					ss.Ports[i].TargetPort.StrVal = "x" + ss.Ports[i].TargetPort.StrVal // non-empty
+				}
+			}
+		},
+		func(n *api.Node, c fuzz.Continue) {
+			c.FuzzNoCustom(n)
+			n.Spec.ExternalID = "external"
 		},
 	)
 	return f

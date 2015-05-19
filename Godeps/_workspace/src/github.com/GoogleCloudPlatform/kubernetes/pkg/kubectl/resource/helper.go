@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@ limitations under the License.
 package resource
 
 import (
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/meta"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/fields"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
@@ -30,7 +29,7 @@ import (
 type Helper struct {
 	// The name of this resource as the server would recognize it
 	Resource string
-	// A RESTClient capable of mutating this resource
+	// A RESTClient capable of mutating this resource.
 	RESTClient RESTClient
 	// A codec for decoding and encoding objects of this resource type.
 	Codec runtime.Codec
@@ -62,11 +61,12 @@ func (m *Helper) Get(namespace, name string) (runtime.Object, error) {
 		Get()
 }
 
+// TODO: add field selector
 func (m *Helper) List(namespace, apiVersion string, selector labels.Selector) (runtime.Object, error) {
 	return m.RESTClient.Get().
 		NamespaceIfScoped(namespace, m.NamespaceScoped).
 		Resource(m.Resource).
-		LabelsSelectorParam(api.LabelSelectorQueryParam(apiVersion), selector).
+		LabelsSelectorParam(selector).
 		Do().
 		Get()
 }
@@ -77,8 +77,8 @@ func (m *Helper) Watch(namespace, resourceVersion, apiVersion string, labelSelec
 		NamespaceIfScoped(namespace, m.NamespaceScoped).
 		Resource(m.Resource).
 		Param("resourceVersion", resourceVersion).
-		LabelsSelectorParam(api.LabelSelectorQueryParam(apiVersion), labelSelector).
-		FieldsSelectorParam(api.FieldSelectorQueryParam(apiVersion), fieldSelector).
+		LabelsSelectorParam(labelSelector).
+		FieldsSelectorParam(fieldSelector).
 		Watch()
 }
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,8 +29,8 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/cache"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
-	algorithm "github.com/GoogleCloudPlatform/kubernetes/pkg/scheduler"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
+	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler/algorithm"
 	schedulerapi "github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler/api"
 	latestschedulerapi "github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler/api/latest"
 )
@@ -115,224 +115,20 @@ func TestCreateFromEmptyConfig(t *testing.T) {
 	factory.CreateFromConfig(policy)
 }
 
-func PredicateOne(pod api.Pod, existingPods []api.Pod, node string) (bool, error) {
+func PredicateOne(pod *api.Pod, existingPods []*api.Pod, node string) (bool, error) {
 	return true, nil
 }
 
-func PredicateTwo(pod api.Pod, existingPods []api.Pod, node string) (bool, error) {
+func PredicateTwo(pod *api.Pod, existingPods []*api.Pod, node string) (bool, error) {
 	return true, nil
 }
 
-func PriorityOne(pod api.Pod, podLister algorithm.PodLister, minionLister algorithm.MinionLister) (algorithm.HostPriorityList, error) {
+func PriorityOne(pod *api.Pod, podLister algorithm.PodLister, minionLister algorithm.MinionLister) (algorithm.HostPriorityList, error) {
 	return []algorithm.HostPriority{}, nil
 }
 
-func PriorityTwo(pod api.Pod, podLister algorithm.PodLister, minionLister algorithm.MinionLister) (algorithm.HostPriorityList, error) {
+func PriorityTwo(pod *api.Pod, podLister algorithm.PodLister, minionLister algorithm.MinionLister) (algorithm.HostPriorityList, error) {
 	return []algorithm.HostPriority{}, nil
-}
-
-func TestPollMinions(t *testing.T) {
-	table := []struct {
-		minions       []api.Node
-		expectedCount int
-	}{
-		{
-			minions: []api.Node{
-				{
-					ObjectMeta: api.ObjectMeta{Name: "foo"},
-					Status: api.NodeStatus{
-						Conditions: []api.NodeCondition{
-							{Type: api.NodeReady, Status: api.ConditionTrue},
-						},
-					},
-				},
-				{
-					ObjectMeta: api.ObjectMeta{Name: "bar"},
-					Status: api.NodeStatus{
-						Conditions: []api.NodeCondition{
-							{Type: api.NodeReachable, Status: api.ConditionTrue},
-						},
-					},
-				},
-				{
-					ObjectMeta: api.ObjectMeta{Name: "fiz"},
-					Status: api.NodeStatus{
-						Conditions: []api.NodeCondition{
-							{Type: api.NodeSchedulable, Status: api.ConditionTrue},
-						},
-					},
-				},
-				{
-					ObjectMeta: api.ObjectMeta{Name: "biz"},
-					Status: api.NodeStatus{
-						Conditions: []api.NodeCondition{
-							{Type: api.NodeReady, Status: api.ConditionTrue},
-							{Type: api.NodeReachable, Status: api.ConditionTrue},
-						},
-					},
-				},
-				{
-					ObjectMeta: api.ObjectMeta{Name: "baz"},
-					Status: api.NodeStatus{
-						Conditions: []api.NodeCondition{
-							{Type: api.NodeReady, Status: api.ConditionTrue},
-							{Type: api.NodeReady, Status: api.ConditionTrue},
-						},
-					},
-				},
-				{
-					ObjectMeta: api.ObjectMeta{Name: "fuz"},
-					Status: api.NodeStatus{
-						Conditions: []api.NodeCondition{
-							{Type: api.NodeSchedulable, Status: api.ConditionTrue},
-							{Type: api.NodeReady, Status: api.ConditionTrue},
-							{Type: api.NodeReachable, Status: api.ConditionTrue},
-						},
-					},
-				},
-				{
-					ObjectMeta: api.ObjectMeta{Name: "buz"},
-					Status: api.NodeStatus{
-						Conditions: []api.NodeCondition{
-							{Type: api.NodeSchedulable, Status: api.ConditionFalse},
-							{Type: api.NodeReady, Status: api.ConditionTrue},
-							{Type: api.NodeReachable, Status: api.ConditionTrue},
-						},
-					},
-				},
-				{
-					ObjectMeta: api.ObjectMeta{Name: "foobar"},
-					Status: api.NodeStatus{
-						Conditions: []api.NodeCondition{
-							{Type: api.NodeSchedulable, Status: api.ConditionTrue},
-							{Type: api.NodeReady, Status: api.ConditionFalse},
-							{Type: api.NodeReachable, Status: api.ConditionTrue},
-						},
-					},
-				},
-				{
-					ObjectMeta: api.ObjectMeta{Name: "fizbiz"},
-					Status: api.NodeStatus{
-						Conditions: []api.NodeCondition{
-							{Type: api.NodeSchedulable, Status: api.ConditionTrue},
-							{Type: api.NodeReachable, Status: api.ConditionFalse},
-						},
-					},
-				},
-			},
-			expectedCount: 5,
-		},
-		{
-			minions: []api.Node{
-				{
-					ObjectMeta: api.ObjectMeta{Name: "foo"},
-					Status: api.NodeStatus{
-						Conditions: []api.NodeCondition{
-							{Type: api.NodeReady, Status: api.ConditionTrue},
-						},
-					},
-				},
-				{
-					ObjectMeta: api.ObjectMeta{Name: "bar"},
-					Status: api.NodeStatus{
-						Conditions: []api.NodeCondition{
-							{Type: api.NodeReady, Status: api.ConditionFalse},
-						},
-					},
-				},
-			},
-			expectedCount: 1,
-		},
-		{
-			minions: []api.Node{
-				{
-					ObjectMeta: api.ObjectMeta{Name: "foo"},
-					Status: api.NodeStatus{
-						Conditions: []api.NodeCondition{
-							{Type: api.NodeSchedulable, Status: api.ConditionTrue},
-						},
-					},
-				},
-				{
-					ObjectMeta: api.ObjectMeta{Name: "bar"},
-					Status: api.NodeStatus{
-						Conditions: []api.NodeCondition{
-							{Type: api.NodeSchedulable, Status: api.ConditionFalse},
-						},
-					},
-				},
-			},
-			expectedCount: 0,
-		},
-		{
-			minions: []api.Node{
-				{
-					ObjectMeta: api.ObjectMeta{Name: "foo"},
-					Status: api.NodeStatus{
-						Conditions: []api.NodeCondition{
-							{Type: api.NodeReady, Status: api.ConditionTrue},
-							{Type: api.NodeReachable, Status: api.ConditionFalse}},
-					},
-				},
-			},
-			expectedCount: 1,
-		},
-		{
-			minions: []api.Node{
-				{
-					ObjectMeta: api.ObjectMeta{Name: "foo"},
-					Status: api.NodeStatus{
-						Conditions: []api.NodeCondition{
-							{Type: api.NodeReachable, Status: api.ConditionTrue},
-							{Type: "invalidValue", Status: api.ConditionFalse}},
-					},
-				},
-			},
-			expectedCount: 1,
-		},
-		{
-			minions: []api.Node{
-				{
-					ObjectMeta: api.ObjectMeta{Name: "foo"},
-					Status: api.NodeStatus{
-						Conditions: []api.NodeCondition{},
-					},
-				},
-			},
-			expectedCount: 0,
-		},
-	}
-
-	for _, item := range table {
-		ml := &api.NodeList{Items: item.minions}
-		handler := util.FakeHandler{
-			StatusCode:   200,
-			ResponseBody: runtime.EncodeOrDie(latest.Codec, ml),
-			T:            t,
-		}
-		mux := http.NewServeMux()
-		// FakeHandler musn't be sent requests other than the one you want to test.
-		resource := "nodes"
-		if api.PreV1Beta3(testapi.Version()) {
-			resource = "minions"
-		}
-		mux.Handle(testapi.ResourcePath(resource, api.NamespaceAll, ""), &handler)
-		server := httptest.NewServer(mux)
-		defer server.Close()
-		client := client.NewOrDie(&client.Config{Host: server.URL, Version: testapi.Version()})
-		cf := NewConfigFactory(client)
-
-		ce, err := cf.pollMinions()
-		if err != nil {
-			t.Errorf("Unexpected error: %v", err)
-			continue
-		}
-		handler.ValidateRequest(t, testapi.ResourcePath(resource, api.NamespaceAll, ""), "GET", nil)
-
-		if a := ce.Len(); item.expectedCount != a {
-			t.Errorf("Expected %v, got %v", item.expectedCount, a)
-		}
-	}
 }
 
 func TestDefaultErrorFunc(t *testing.T) {
@@ -374,7 +170,7 @@ func TestDefaultErrorFunc(t *testing.T) {
 		if !exists {
 			continue
 		}
-		handler.ValidateRequest(t, testapi.ResourcePathWithQueryParams("pods", "bar", "foo"), "GET", nil)
+		handler.ValidateRequest(t, testapi.ResourcePathWithNamespaceQuery("pods", "bar", "foo"), "GET", nil)
 		if e, a := testPod, got; !reflect.DeepEqual(e, a) {
 			t.Errorf("Expected %v, got %v", e, a)
 		}
@@ -445,7 +241,7 @@ func TestBind(t *testing.T) {
 			continue
 		}
 		expectedBody := runtime.EncodeOrDie(testapi.Codec(), item.binding)
-		handler.ValidateRequest(t, testapi.ResourcePathWithQueryParams("bindings", api.NamespaceDefault, ""), "POST", &expectedBody)
+		handler.ValidateRequest(t, testapi.ResourcePathWithNamespaceQuery("bindings", api.NamespaceDefault, ""), "POST", &expectedBody)
 	}
 }
 

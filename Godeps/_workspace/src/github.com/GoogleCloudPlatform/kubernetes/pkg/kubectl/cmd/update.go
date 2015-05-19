@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,10 +20,12 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/spf13/cobra"
+
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl"
 	cmdutil "github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/cmd/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/resource"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
-	"github.com/spf13/cobra"
 )
 
 const (
@@ -40,7 +42,7 @@ $ cat pod.json | kubectl update -f -
 $ kubectl update pods my-pod --patch='{ "apiVersion": "v1beta1", "desiredState": { "manifest": [{ "cpu": 100 }]}}'`
 )
 
-func (f *Factory) NewCmdUpdate(out io.Writer) *cobra.Command {
+func NewCmdUpdate(f *cmdutil.Factory, out io.Writer) *cobra.Command {
 	var filenames util.StringList
 	cmd := &cobra.Command{
 		Use:     "update -f FILENAME",
@@ -52,12 +54,15 @@ func (f *Factory) NewCmdUpdate(out io.Writer) *cobra.Command {
 			cmdutil.CheckErr(err)
 		},
 	}
-	cmd.Flags().VarP(&filenames, "filename", "f", "Filename, directory, or URL to file to use to update the resource.")
+	usage := "Filename, directory, or URL to file to use to update the resource."
+	kubectl.AddJsonFilenameFlag(cmd, &filenames, usage)
+	cmd.MarkFlagRequired("filename")
 	cmd.Flags().String("patch", "", "A JSON document to override the existing resource. The resource is downloaded, patched with the JSON, then updated.")
+	cmd.MarkFlagRequired("patch")
 	return cmd
 }
 
-func RunUpdate(f *Factory, out io.Writer, cmd *cobra.Command, args []string, filenames util.StringList) error {
+func RunUpdate(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []string, filenames util.StringList) error {
 	schema, err := f.Validator()
 	if err != nil {
 		return err
@@ -88,6 +93,7 @@ func RunUpdate(f *Factory, out io.Writer, cmd *cobra.Command, args []string, fil
 
 	mapper, typer := f.Object()
 	r := resource.NewBuilder(mapper, typer, f.ClientMapperForCommand()).
+		Schema(schema).
 		ContinueOnError().
 		NamespaceParam(cmdNamespace).RequireNamespace().
 		FilenameParam(filenames...).
@@ -103,9 +109,6 @@ func RunUpdate(f *Factory, out io.Writer, cmd *cobra.Command, args []string, fil
 		if err != nil {
 			return err
 		}
-		if err := schema.ValidateBytes(data); err != nil {
-			return err
-		}
 		obj, err := resource.NewHelper(info.Client, info.Mapping).Update(info.Namespace, info.Name, true, data)
 		if err != nil {
 			return err
@@ -114,18 +117,26 @@ func RunUpdate(f *Factory, out io.Writer, cmd *cobra.Command, args []string, fil
 		fmt.Fprintf(out, "%s/%s\n", info.Mapping.Resource, info.Name)
 		return nil
 	})
-
 }
 
-func updateWithPatch(cmd *cobra.Command, args []string, f *Factory, patch string) (string, error) {
+func updateWithPatch(cmd *cobra.Command, args []string, f *cmdutil.Factory, patch string) (string, error) {
 	cmdNamespace, err := f.DefaultNamespace()
 	if err != nil {
 		return "", err
 	}
 
-	mapper, _ := f.Object()
-	// TODO: use resource.Builder instead
-	mapping, namespace, name, err := cmdutil.ResourceFromArgs(cmd, args, mapper, cmdNamespace)
+	mapper, typer := f.Object()
+	r := resource.NewBuilder(mapper, typer, f.ClientMapperForCommand()).
+		ContinueOnError().
+		NamespaceParam(cmdNamespace).DefaultNamespace().
+		ResourceTypeOrNameArgs(false, args...).
+		Flatten().
+		Do()
+	err = r.Err()
+	if err != nil {
+		return "", err
+	}
+	mapping, err := r.ResourceMapping()
 	if err != nil {
 		return "", err
 	}
@@ -133,6 +144,12 @@ func updateWithPatch(cmd *cobra.Command, args []string, f *Factory, patch string
 	if err != nil {
 		return "", err
 	}
+
+	infos, err := r.Infos()
+	if err != nil {
+		return "", err
+	}
+	name, namespace := infos[0].Name, infos[0].Namespace
 
 	helper := resource.NewHelper(client, mapping)
 	obj, err := helper.Get(namespace, name)

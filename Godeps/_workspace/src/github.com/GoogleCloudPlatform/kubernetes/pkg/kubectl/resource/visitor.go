@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import (
 	"github.com/golang/glog"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/meta"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/validation"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/yaml"
@@ -180,6 +181,20 @@ func (l EagerVisitorList) Visit(fn VisitorFunc) error {
 	return errors.NewAggregate(errs)
 }
 
+func ValidateSchema(data []byte, schema validation.Schema) error {
+	if schema == nil {
+		return nil
+	}
+	data, err := yaml.ToJSON(data)
+	if err != nil {
+		return fmt.Errorf("error converting to YAML: %v", err)
+	}
+	if err := schema.ValidateBytes(data); err != nil {
+		return fmt.Errorf("error validating data: %v", err)
+	}
+	return nil
+}
+
 // PathVisitor visits a given path and returns an object representing the file
 // at that path.
 type PathVisitor struct {
@@ -188,6 +203,8 @@ type PathVisitor struct {
 	Path string
 	// Whether to ignore files that are not recognized as API objects
 	IgnoreErrors bool
+	// Schema for validation
+	Schema validation.Schema
 }
 
 func (v *PathVisitor) Visit(fn VisitorFunc) error {
@@ -195,9 +212,12 @@ func (v *PathVisitor) Visit(fn VisitorFunc) error {
 	if err != nil {
 		return fmt.Errorf("unable to read %q: %v", v.Path, err)
 	}
+	if err := ValidateSchema(data, v.Schema); err != nil {
+		return err
+	}
 	info, err := v.Mapper.InfoForData(data, v.Path)
 	if err != nil {
-		if v.IgnoreErrors {
+		if !v.IgnoreErrors {
 			return err
 		}
 		glog.V(2).Infof("Unable to load file %q: %v", v.Path, err)
@@ -218,6 +238,8 @@ type DirectoryVisitor struct {
 	Extensions []string
 	// Whether to ignore files that are not recognized as API objects
 	IgnoreErrors bool
+	// Schema for validation
+	Schema validation.Schema
 }
 
 func (v *DirectoryVisitor) ignoreFile(path string) bool {
@@ -253,9 +275,12 @@ func (v *DirectoryVisitor) Visit(fn VisitorFunc) error {
 		if err != nil {
 			return fmt.Errorf("unable to read %q: %v", path, err)
 		}
+		if err := ValidateSchema(data, v.Schema); err != nil {
+			return err
+		}
 		info, err := v.Mapper.InfoForData(data, path)
 		if err != nil {
-			if v.IgnoreErrors {
+			if !v.IgnoreErrors {
 				return err
 			}
 			glog.V(2).Infof("Unable to load file %q: %v", path, err)
@@ -269,7 +294,8 @@ func (v *DirectoryVisitor) Visit(fn VisitorFunc) error {
 // an info object representing the downloaded object.
 type URLVisitor struct {
 	*Mapper
-	URL *url.URL
+	URL    *url.URL
+	Schema validation.Schema
 }
 
 func (v *URLVisitor) Visit(fn VisitorFunc) error {
@@ -284,6 +310,9 @@ func (v *URLVisitor) Visit(fn VisitorFunc) error {
 	data, err := ioutil.ReadAll(res.Body)
 	if err != nil {
 		return fmt.Errorf("unable to read URL %q: %v\n", v.URL, err)
+	}
+	if err := ValidateSchema(data, v.Schema); err != nil {
+		return err
 	}
 	info, err := v.Mapper.InfoForData(data, v.URL.String())
 	if err != nil {
@@ -321,6 +350,36 @@ func (v DecoratedVisitor) Visit(fn VisitorFunc) error {
 	})
 }
 
+// ContinueOnErrorVisitor visits each item and, if an error occurs on
+// any individual item, returns an aggregate error after all items
+// are visited.
+type ContinueOnErrorVisitor struct {
+	Visitor
+}
+
+// Visit returns nil if no error occurs during traversal, a regular
+// error if one occurs, or if multiple errors occur, an aggregate
+// error.  If the provided visitor fails on any individual item it
+// will not prevent the remaining items from being visited. An error
+// returned by the visitor directly may still result in some items
+// not being visited.
+func (v ContinueOnErrorVisitor) Visit(fn VisitorFunc) error {
+	errs := []error{}
+	err := v.Visitor.Visit(func(info *Info) error {
+		if err := fn(info); err != nil {
+			errs = append(errs, err)
+		}
+		return nil
+	})
+	if err != nil {
+		errs = append(errs, err)
+	}
+	if len(errs) == 1 {
+		return errs[0]
+	}
+	return errors.NewAggregate(errs)
+}
+
 // FlattenListVisitor flattens any objects that runtime.ExtractList recognizes as a list
 // - has an "Items" public field that is a slice of runtime.Objects or objects satisfying
 // that interface - into multiple Infos. An error on any sub item (for instance, if a List
@@ -346,6 +405,12 @@ func (v FlattenListVisitor) Visit(fn VisitorFunc) error {
 		items, err := runtime.ExtractList(info.Object)
 		if err != nil {
 			return fn(info)
+		}
+		if errs := runtime.DecodeList(items, struct {
+			runtime.ObjectTyper
+			runtime.Decoder
+		}{v.Mapper, info.Mapping.Codec}); len(errs) > 0 {
+			return errors.NewAggregate(errs)
 		}
 		for i := range items {
 			item, err := v.InfoForObject(items[i])
@@ -373,6 +438,7 @@ type StreamVisitor struct {
 
 	Source       string
 	IgnoreErrors bool
+	Schema       validation.Schema
 }
 
 // NewStreamVisitor creates a visitor that will return resources that were encoded into the provided
@@ -380,8 +446,8 @@ type StreamVisitor struct {
 // empty stream is treated as an error for now.
 // TODO: convert ignoreErrors into a func(data, error, count) bool that consumers can use to decide
 // what to do with ignored errors.
-func NewStreamVisitor(r io.Reader, mapper *Mapper, source string, ignoreErrors bool) Visitor {
-	return &StreamVisitor{r, mapper, source, ignoreErrors}
+func NewStreamVisitor(r io.Reader, mapper *Mapper, schema validation.Schema, source string, ignoreErrors bool) Visitor {
+	return &StreamVisitor{r, mapper, source, ignoreErrors, schema}
 }
 
 // Visit implements Visitor over a stream.
@@ -398,6 +464,9 @@ func (v *StreamVisitor) Visit(fn VisitorFunc) error {
 		ext.RawJSON = bytes.TrimSpace(ext.RawJSON)
 		if len(ext.RawJSON) == 0 || bytes.Equal(ext.RawJSON, []byte("null")) {
 			continue
+		}
+		if err := ValidateSchema(ext.RawJSON, v.Schema); err != nil {
+			return err
 		}
 		info, err := v.InfoForData(ext.RawJSON, v.Source)
 		if err != nil {
@@ -435,6 +504,9 @@ func FilterNamespace(info *Info) error {
 // set. If info.Object is set, it will be mutated as well.
 func SetNamespace(namespace string) VisitorFunc {
 	return func(info *Info) error {
+		if !info.Namespaced() {
+			return nil
+		}
 		if len(info.Namespace) == 0 {
 			info.Namespace = namespace
 			UpdateObjectNamespace(info)

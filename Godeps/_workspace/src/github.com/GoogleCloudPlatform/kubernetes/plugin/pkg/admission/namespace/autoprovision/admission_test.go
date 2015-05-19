@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,14 +22,14 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/admission"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/cache"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/testclient"
 )
 
 // TestAdmission verifies a namespace is created on create requests for namespace managed resources
 func TestAdmission(t *testing.T) {
 	namespace := "test"
-	mockClient := &client.Fake{}
+	mockClient := &testclient.Fake{}
 	handler := &provision{
 		client: mockClient,
 		store:  cache.NewStore(cache.MetaNamespaceKeyFunc),
@@ -41,7 +41,7 @@ func TestAdmission(t *testing.T) {
 			Containers: []api.Container{{Name: "ctr", Image: "image"}},
 		},
 	}
-	err := handler.Admit(admission.NewAttributesRecord(&pod, namespace, "pods", "CREATE"))
+	err := handler.Admit(admission.NewAttributesRecord(&pod, "Pod", namespace, "pods", "CREATE", nil))
 	if err != nil {
 		t.Errorf("Unexpected error returned from admission handler")
 	}
@@ -56,7 +56,7 @@ func TestAdmission(t *testing.T) {
 // TestAdmissionNamespaceExists verifies that no client call is made when a namespace already exists
 func TestAdmissionNamespaceExists(t *testing.T) {
 	namespace := "test"
-	mockClient := &client.Fake{}
+	mockClient := &testclient.Fake{}
 	store := cache.NewStore(cache.MetaNamespaceKeyFunc)
 	store.Add(&api.Namespace{
 		ObjectMeta: api.ObjectMeta{Name: namespace},
@@ -72,7 +72,7 @@ func TestAdmissionNamespaceExists(t *testing.T) {
 			Containers: []api.Container{{Name: "ctr", Image: "image"}},
 		},
 	}
-	err := handler.Admit(admission.NewAttributesRecord(&pod, namespace, "pods", "CREATE"))
+	err := handler.Admit(admission.NewAttributesRecord(&pod, "Pod", namespace, "pods", "CREATE", nil))
 	if err != nil {
 		t.Errorf("Unexpected error returned from admission handler")
 	}
@@ -84,7 +84,7 @@ func TestAdmissionNamespaceExists(t *testing.T) {
 // TestIgnoreAdmission validates that a request is ignored if its not a create
 func TestIgnoreAdmission(t *testing.T) {
 	namespace := "test"
-	mockClient := &client.Fake{}
+	mockClient := &testclient.Fake{}
 	handler := &provision{
 		client: mockClient,
 		store:  cache.NewStore(cache.MetaNamespaceKeyFunc),
@@ -96,7 +96,7 @@ func TestIgnoreAdmission(t *testing.T) {
 			Containers: []api.Container{{Name: "ctr", Image: "image"}},
 		},
 	}
-	err := handler.Admit(admission.NewAttributesRecord(&pod, namespace, "pods", "UPDATE"))
+	err := handler.Admit(admission.NewAttributesRecord(&pod, "Pod", namespace, "pods", "UPDATE", nil))
 	if err != nil {
 		t.Errorf("Unexpected error returned from admission handler")
 	}
@@ -108,7 +108,7 @@ func TestIgnoreAdmission(t *testing.T) {
 // TestAdmissionNamespaceExistsUnknownToHandler
 func TestAdmissionNamespaceExistsUnknownToHandler(t *testing.T) {
 	namespace := "test"
-	mockClient := &client.Fake{
+	mockClient := &testclient.Fake{
 		Err: errors.NewAlreadyExists("namespaces", namespace),
 	}
 	store := cache.NewStore(cache.MetaNamespaceKeyFunc)
@@ -123,7 +123,7 @@ func TestAdmissionNamespaceExistsUnknownToHandler(t *testing.T) {
 			Containers: []api.Container{{Name: "ctr", Image: "image"}},
 		},
 	}
-	err := handler.Admit(admission.NewAttributesRecord(&pod, namespace, "pods", "CREATE"))
+	err := handler.Admit(admission.NewAttributesRecord(&pod, "Pod", namespace, "pods", "CREATE", nil))
 	if err != nil {
 		t.Errorf("Unexpected error returned from admission handler")
 	}

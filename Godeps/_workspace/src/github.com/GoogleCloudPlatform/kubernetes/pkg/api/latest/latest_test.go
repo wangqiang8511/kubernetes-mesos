@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -72,11 +72,15 @@ func TestInterfacesFor(t *testing.T) {
 }
 
 func TestRESTMapper(t *testing.T) {
-	if v, k, err := RESTMapper.VersionAndKindForResource("replicationControllers"); err != nil || v != Version || k != "ReplicationController" {
+	if v, k, err := RESTMapper.VersionAndKindForResource("replicationControllers"); err != nil || v != "v1beta3" || k != "ReplicationController" {
 		t.Errorf("unexpected version mapping: %s %s %v", v, k, err)
 	}
-	if v, k, err := RESTMapper.VersionAndKindForResource("replicationcontrollers"); err != nil || v != Version || k != "ReplicationController" {
+	if v, k, err := RESTMapper.VersionAndKindForResource("replicationcontrollers"); err != nil || v != "v1beta3" || k != "ReplicationController" {
 		t.Errorf("unexpected version mapping: %s %s %v", v, k, err)
+	}
+
+	if m, err := RESTMapper.RESTMapping("PodTemplate", ""); err != nil || m.APIVersion != "v1beta3" || m.Resource != "podtemplates" {
+		t.Errorf("unexpected version mapping: %#v %v", m, err)
 	}
 
 	for _, version := range Versions {
@@ -94,7 +98,7 @@ func TestRESTMapper(t *testing.T) {
 
 		interfaces, _ := InterfacesFor(version)
 		if mapping.Codec != interfaces.Codec {
-			t.Errorf("unexpected codec: %#v", mapping)
+			t.Errorf("unexpected codec: %#v, expected: %#v", mapping, interfaces)
 		}
 
 		rc := &internal.ReplicationController{ObjectMeta: internal.ObjectMeta{Name: "foo"}}

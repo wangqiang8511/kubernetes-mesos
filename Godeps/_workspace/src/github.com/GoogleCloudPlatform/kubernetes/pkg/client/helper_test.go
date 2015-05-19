@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -273,6 +273,8 @@ func TestSetKubernetesDefaults(t *testing.T) {
 				Version:        latest.Version,
 				Codec:          latest.Codec,
 				LegacyBehavior: (latest.Version == "v1beta1" || latest.Version == "v1beta2"),
+				QPS:            5,
+				Burst:          10,
 			},
 			false,
 		},
@@ -307,7 +309,7 @@ func TestSetKubernetesDefaults(t *testing.T) {
 func TestSetKubernetesDefaultsUserAgent(t *testing.T) {
 	config := &Config{}
 	if err := SetKubernetesDefaults(config); err != nil {
-		t.Errorf("unexpected error: %v")
+		t.Errorf("unexpected error: %v", err)
 	}
 	if !strings.Contains(config.UserAgent, "kubernetes/") {
 		t.Errorf("no user agent set: %#v", config)

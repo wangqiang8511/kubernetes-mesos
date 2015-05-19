@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -86,6 +86,32 @@ func (m *Broadcaster) Watch() Interface {
 		m:       m,
 	}
 	m.watchers[id] = w
+	return w
+}
+
+// WatchWithPrefix adds a new watcher to the list and returns an Interface for it. It sends
+// queuedEvents down the new watch before beginning to send ordinary events from Broadcaster.
+// The returned watch will have a queue length that is at least large enough to accomodate
+// all of the items in queuedEvents.
+func (m *Broadcaster) WatchWithPrefix(queuedEvents []Event) Interface {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	id := m.nextWatcher
+	m.nextWatcher++
+	length := m.watchQueueLength
+	if n := len(queuedEvents) + 1; n > length {
+		length = n
+	}
+	w := &broadcasterWatcher{
+		result:  make(chan Event, length),
+		stopped: make(chan struct{}),
+		id:      id,
+		m:       m,
+	}
+	m.watchers[id] = w
+	for _, e := range queuedEvents {
+		w.result <- e
+	}
 	return w
 }
 

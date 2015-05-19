@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const dnsTimeout time.Duration = 2 * time.Second
+const dnsTimeout time.Duration = 2 * 1e9
 const tcpIdleTimeout time.Duration = 8 * time.Second
 
 // A Conn represents a connection to a DNS server.
@@ -26,9 +26,9 @@ type Conn struct {
 type Client struct {
 	Net            string            // if "tcp" a TCP query will be initiated, otherwise an UDP one (default is "" for UDP)
 	UDPSize        uint16            // minimum receive buffer for UDP messages
-	DialTimeout    time.Duration     // net.DialTimeout, defaults to 2 seconds
-	ReadTimeout    time.Duration     // net.Conn.SetReadTimeout value for connections, defaults to 2 seconds
-	WriteTimeout   time.Duration     // net.Conn.SetWriteTimeout value for connections, defaults to 2 seconds
+	DialTimeout    time.Duration     // net.DialTimeout (ns), defaults to 2 * 1e9
+	ReadTimeout    time.Duration     // net.Conn.SetReadTimeout value for connections (ns), defaults to 2 * 1e9
+	WriteTimeout   time.Duration     // net.Conn.SetWriteTimeout value for connections (ns), defaults to 2 * 1e9
 	TsigSecret     map[string]string // secret(s) for Tsig map[<zonename>]<base64 secret>, zonename must be fully qualified
 	SingleInflight bool              // if true suppress multiple outstanding queries for the same Qname, Qtype and Qclass
 	group          singleflight
@@ -55,20 +55,10 @@ func Exchange(m *Msg, a string) (r *Msg, err error) {
 	defer co.Close()
 	co.SetReadDeadline(time.Now().Add(dnsTimeout))
 	co.SetWriteDeadline(time.Now().Add(dnsTimeout))
-
-	opt := m.IsEdns0()
-	// If EDNS0 is used use that for size.
-	if opt != nil && opt.UDPSize() >= MinMsgSize {
-		co.UDPSize = opt.UDPSize()
-	}
-
 	if err = co.WriteMsg(m); err != nil {
 		return nil, err
 	}
 	r, err = co.ReadMsg()
-	if err == nil && r.Id != m.Id {
-		err = ErrId
-	}
 	return r, err
 }
 
@@ -89,9 +79,6 @@ func ExchangeConn(c net.Conn, m *Msg) (r *Msg, err error) {
 		return nil, err
 	}
 	r, err = co.ReadMsg()
-	if err == nil && r.Id != m.Id {
-		err = ErrId
-	}
 	return r, err
 }
 
@@ -128,39 +115,31 @@ func (c *Client) Exchange(m *Msg, a string) (r *Msg, rtt time.Duration, err erro
 	return r, rtt, nil
 }
 
-func (c *Client) dialTimeout() time.Duration {
-	if c.DialTimeout != 0 {
-		return c.DialTimeout
-	}
-	return dnsTimeout
-}
-
-func (c *Client) readTimeout() time.Duration {
-	if c.ReadTimeout != 0 {
-		return c.ReadTimeout
-	}
-	return dnsTimeout
-}
-
-func (c *Client) writeTimeout() time.Duration {
-	if c.WriteTimeout != 0 {
-		return c.WriteTimeout
-	}
-	return dnsTimeout
-}
-
 func (c *Client) exchange(m *Msg, a string) (r *Msg, rtt time.Duration, err error) {
+	timeout := dnsTimeout
 	var co *Conn
+	if c.DialTimeout != 0 {
+		timeout = c.DialTimeout
+	}
 	if c.Net == "" {
-		co, err = DialTimeout("udp", a, c.dialTimeout())
+		co, err = DialTimeout("udp", a, timeout)
 	} else {
-		co, err = DialTimeout(c.Net, a, c.dialTimeout())
+		co, err = DialTimeout(c.Net, a, timeout)
 	}
 	if err != nil {
 		return nil, 0, err
 	}
+	timeout = dnsTimeout
+	if c.ReadTimeout != 0 {
+		timeout = c.ReadTimeout
+	}
+	co.SetReadDeadline(time.Now().Add(timeout))
+	timeout = dnsTimeout
+	if c.WriteTimeout != 0 {
+		timeout = c.WriteTimeout
+	}
+	co.SetWriteDeadline(time.Now().Add(timeout))
 	defer co.Close()
-
 	opt := m.IsEdns0()
 	// If EDNS0 is used use that for size.
 	if opt != nil && opt.UDPSize() >= MinMsgSize {
@@ -170,18 +149,11 @@ func (c *Client) exchange(m *Msg, a string) (r *Msg, rtt time.Duration, err erro
 	if opt == nil && c.UDPSize >= MinMsgSize {
 		co.UDPSize = c.UDPSize
 	}
-
-	co.SetReadDeadline(time.Now().Add(c.readTimeout()))
-	co.SetWriteDeadline(time.Now().Add(c.writeTimeout()))
-
 	co.TsigSecret = c.TsigSecret
 	if err = co.WriteMsg(m); err != nil {
 		return nil, 0, err
 	}
 	r, err = co.ReadMsg()
-	if err == nil && r.Id != m.Id {
-		err = ErrId
-	}
 	return r, co.rtt, err
 }
 
@@ -318,7 +290,7 @@ func Dial(network, address string) (conn *Conn, err error) {
 	return conn, nil
 }
 
-// DialTimeout acts like Dial but takes a timeout.
+// Dialtimeout acts like Dial but takes a timeout.
 func DialTimeout(network, address string, timeout time.Duration) (conn *Conn, err error) {
 	conn = new(Conn)
 	conn.Conn, err = net.DialTimeout(network, address, timeout)

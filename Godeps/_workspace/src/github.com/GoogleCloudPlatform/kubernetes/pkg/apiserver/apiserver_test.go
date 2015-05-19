@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -114,13 +114,17 @@ func init() {
 	// api.Status is returned in errors
 
 	// "internal" version
-	api.Scheme.AddKnownTypes("", &Simple{}, &SimpleList{}, &api.Status{}, &api.ListOptions{})
+	api.Scheme.AddKnownTypes("", &Simple{}, &SimpleList{}, &api.Status{}, &api.ListOptions{}, &SimpleGetOptions{}, &SimpleRoot{})
 	// "version" version
 	// TODO: Use versioned api objects?
-	api.Scheme.AddKnownTypes(testVersion, &Simple{}, &SimpleList{}, &v1beta1.Status{})
+	api.Scheme.AddKnownTypes(testVersion, &Simple{}, &SimpleList{}, &v1beta1.Status{}, &SimpleGetOptions{}, &SimpleRoot{})
 	// "version2" version
 	// TODO: Use versioned api objects?
-	api.Scheme.AddKnownTypes(testVersion2, &Simple{}, &SimpleList{}, &v1beta3.Status{})
+	api.Scheme.AddKnownTypes(testVersion2, &Simple{}, &SimpleList{}, &v1beta3.Status{}, &SimpleGetOptions{}, &SimpleRoot{})
+
+	// Register SimpleGetOptions with the server versions to convert query params to it
+	api.Scheme.AddKnownTypes("v1beta1", &SimpleGetOptions{})
+	api.Scheme.AddKnownTypes("v1beta3", &SimpleGetOptions{})
 
 	nsMapper := newMapper()
 	legacyNsMapper := newMapper()
@@ -128,8 +132,14 @@ func init() {
 	for _, version := range versions {
 		for kind := range api.Scheme.KnownTypes(version) {
 			mixedCase := true
-			legacyNsMapper.Add(meta.RESTScopeNamespaceLegacy, kind, version, mixedCase)
-			nsMapper.Add(meta.RESTScopeNamespace, kind, version, mixedCase)
+			root := kind == "SimpleRoot"
+			if root {
+				legacyNsMapper.Add(meta.RESTScopeRoot, kind, version, mixedCase)
+				nsMapper.Add(meta.RESTScopeRoot, kind, version, mixedCase)
+			} else {
+				legacyNsMapper.Add(meta.RESTScopeNamespaceLegacy, kind, version, mixedCase)
+				nsMapper.Add(meta.RESTScopeNamespace, kind, version, mixedCase)
+			}
 		}
 	}
 
@@ -231,6 +241,24 @@ type Simple struct {
 
 func (*Simple) IsAnAPIObject() {}
 
+type SimpleRoot struct {
+	api.TypeMeta   `json:",inline"`
+	api.ObjectMeta `json:"metadata"`
+	Other          string            `json:"other,omitempty"`
+	Labels         map[string]string `json:"labels,omitempty"`
+}
+
+func (*SimpleRoot) IsAnAPIObject() {}
+
+type SimpleGetOptions struct {
+	api.TypeMeta `json:",inline"`
+	Param1       string `json:"param1"`
+	Param2       string `json:"param2"`
+	Path         string `json:"atAPath"`
+}
+
+func (*SimpleGetOptions) IsAnAPIObject() {}
+
 type SimpleList struct {
 	api.TypeMeta `json:",inline"`
 	api.ListMeta `json:"metadata,inline"`
@@ -241,6 +269,21 @@ func (*SimpleList) IsAnAPIObject() {}
 
 func TestSimpleSetupRight(t *testing.T) {
 	s := &Simple{ObjectMeta: api.ObjectMeta{Name: "aName"}}
+	wire, err := codec.Encode(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := codec.Decode(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(s, s2) {
+		t.Fatalf("encode/decode broken:\n%#v\n%#v\n", s, s2)
+	}
+}
+
+func TestSimpleOptionsSetupRight(t *testing.T) {
+	s := &SimpleGetOptions{}
 	wire, err := codec.Encode(s)
 	if err != nil {
 		t.Fatal(err)
@@ -314,10 +357,23 @@ func (s *SimpleStream) Close() error {
 
 func (s *SimpleStream) IsAnAPIObject() {}
 
-func (s *SimpleStream) InputStream(version, accept string) (io.ReadCloser, string, error) {
+func (s *SimpleStream) InputStream(version, accept string) (io.ReadCloser, bool, string, error) {
 	s.version = version
 	s.accept = accept
-	return s, s.contentType, s.err
+	return s, false, s.contentType, s.err
+}
+
+type SimpleConnectHandler struct {
+	response string
+	err      error
+}
+
+func (h *SimpleConnectHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	w.Write([]byte(h.response))
+}
+
+func (h *SimpleConnectHandler) RequestError() error {
+	return h.err
 }
 
 func (storage *SimpleRESTStorage) Get(ctx api.Context, id string) (runtime.Object, error) {
@@ -415,6 +471,39 @@ func (storage *SimpleRESTStorage) ResourceLocation(ctx api.Context, id string) (
 	return &locationCopy, nil, nil
 }
 
+// Implement Connecter
+type ConnecterRESTStorage struct {
+	connectHandler         rest.ConnectHandler
+	emptyConnectOptions    runtime.Object
+	receivedConnectOptions runtime.Object
+	receivedID             string
+	takesPath              string
+}
+
+// Implement Connecter
+var _ = rest.Connecter(&ConnecterRESTStorage{})
+
+func (s *ConnecterRESTStorage) New() runtime.Object {
+	return &Simple{}
+}
+
+func (s *ConnecterRESTStorage) Connect(ctx api.Context, id string, options runtime.Object) (rest.ConnectHandler, error) {
+	s.receivedConnectOptions = options
+	s.receivedID = id
+	return s.connectHandler, nil
+}
+
+func (s *ConnecterRESTStorage) ConnectMethods() []string {
+	return []string{"GET", "POST", "PUT", "DELETE"}
+}
+
+func (s *ConnecterRESTStorage) NewConnectOptions() (runtime.Object, bool, string) {
+	if len(s.takesPath) > 0 {
+		return s.emptyConnectOptions, true, s.takesPath
+	}
+	return s.emptyConnectOptions, false, ""
+}
+
 type LegacyRESTStorage struct {
 	*SimpleRESTStorage
 }
@@ -430,6 +519,72 @@ type MetadataRESTStorage struct {
 
 func (m *MetadataRESTStorage) ProducesMIMETypes(method string) []string {
 	return m.types
+}
+
+var _ rest.StorageMetadata = &MetadataRESTStorage{}
+
+type GetWithOptionsRESTStorage struct {
+	*SimpleRESTStorage
+	optionsReceived runtime.Object
+	takesPath       string
+}
+
+func (r *GetWithOptionsRESTStorage) Get(ctx api.Context, name string, options runtime.Object) (runtime.Object, error) {
+	if _, ok := options.(*SimpleGetOptions); !ok {
+		return nil, fmt.Errorf("Unexpected options object: %#v", options)
+	}
+	r.optionsReceived = options
+	return r.SimpleRESTStorage.Get(ctx, name)
+}
+
+func (r *GetWithOptionsRESTStorage) NewGetOptions() (runtime.Object, bool, string) {
+	if len(r.takesPath) > 0 {
+		return &SimpleGetOptions{}, true, r.takesPath
+	}
+	return &SimpleGetOptions{}, false, ""
+}
+
+var _ rest.GetterWithOptions = &GetWithOptionsRESTStorage{}
+
+type NamedCreaterRESTStorage struct {
+	*SimpleRESTStorage
+	createdName string
+}
+
+func (storage *NamedCreaterRESTStorage) Create(ctx api.Context, name string, obj runtime.Object) (runtime.Object, error) {
+	storage.checkContext(ctx)
+	storage.created = obj.(*Simple)
+	storage.createdName = name
+	if err := storage.errors["create"]; err != nil {
+		return nil, err
+	}
+	var err error
+	if storage.injectedFunction != nil {
+		obj, err = storage.injectedFunction(obj)
+	}
+	return obj, err
+}
+
+type SimpleTypedStorage struct {
+	errors   map[string]error
+	item     runtime.Object
+	baseType runtime.Object
+
+	actualNamespace  string
+	namespacePresent bool
+}
+
+func (storage *SimpleTypedStorage) New() runtime.Object {
+	return storage.baseType
+}
+
+func (storage *SimpleTypedStorage) Get(ctx api.Context, id string) (runtime.Object, error) {
+	storage.checkContext(ctx)
+	return api.Scheme.CopyOrDie(storage.item), storage.errors["get"]
+}
+
+func (storage *SimpleTypedStorage) checkContext(ctx api.Context) {
+	storage.actualNamespace, storage.namespacePresent = api.NamespaceFrom(ctx)
 }
 
 func extractBody(response *http.Response, object runtime.Object) (string, error) {
@@ -653,7 +808,7 @@ func TestList(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("%d: unexpected status: %d, Expected: %d, %#v", i, resp.StatusCode, http.StatusOK, resp)
 			body, _ := ioutil.ReadAll(resp.Body)
-			t.Logf("%d: body: %s", string(body))
+			t.Logf("%d: body: %s", i, string(body))
 			continue
 		}
 		// TODO: future, restore get links
@@ -878,6 +1033,88 @@ func TestGetBinary(t *testing.T) {
 	}
 }
 
+func TestGetWithOptions(t *testing.T) {
+	storage := map[string]rest.Storage{}
+	simpleStorage := GetWithOptionsRESTStorage{
+		SimpleRESTStorage: &SimpleRESTStorage{
+			item: Simple{
+				Other: "foo",
+			},
+		},
+	}
+	storage["simple"] = &simpleStorage
+	handler := handle(storage)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/api/version/simple/id?param1=test1&param2=test2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected response: %#v", resp)
+	}
+	var itemOut Simple
+	body, err := extractBody(resp, &itemOut)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	if itemOut.Name != simpleStorage.item.Name {
+		t.Errorf("Unexpected data: %#v, expected %#v (%s)", itemOut, simpleStorage.item, string(body))
+	}
+
+	opts, ok := simpleStorage.optionsReceived.(*SimpleGetOptions)
+	if !ok {
+		t.Errorf("Unexpected options object received: %#v", simpleStorage.optionsReceived)
+		return
+	}
+	if opts.Param1 != "test1" || opts.Param2 != "test2" {
+		t.Errorf("Did not receive expected options: %#v", opts)
+	}
+}
+
+func TestGetWithOptionsAndPath(t *testing.T) {
+	storage := map[string]rest.Storage{}
+	simpleStorage := GetWithOptionsRESTStorage{
+		SimpleRESTStorage: &SimpleRESTStorage{
+			item: Simple{
+				Other: "foo",
+			},
+		},
+		takesPath: "atAPath",
+	}
+	storage["simple"] = &simpleStorage
+	handler := handle(storage)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/api/version/simple/id/a/different/path?param1=test1&param2=test2&atAPath=not")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected response: %#v", resp)
+	}
+	var itemOut Simple
+	body, err := extractBody(resp, &itemOut)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	if itemOut.Name != simpleStorage.item.Name {
+		t.Errorf("Unexpected data: %#v, expected %#v (%s)", itemOut, simpleStorage.item, string(body))
+	}
+
+	opts, ok := simpleStorage.optionsReceived.(*SimpleGetOptions)
+	if !ok {
+		t.Errorf("Unexpected options object received: %#v", simpleStorage.optionsReceived)
+		return
+	}
+	if opts.Param1 != "test1" || opts.Param2 != "test2" || opts.Path != "a/different/path" {
+		t.Errorf("Did not receive expected options: %#v", opts)
+	}
+}
 func TestGetAlternateSelfLink(t *testing.T) {
 	storage := map[string]rest.Storage{}
 	simpleStorage := SimpleRESTStorage{
@@ -970,6 +1207,138 @@ func TestGetMissing(t *testing.T) {
 
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("Unexpected response %#v", resp)
+	}
+}
+
+func TestConnect(t *testing.T) {
+	responseText := "Hello World"
+	itemID := "theID"
+	connectStorage := &ConnecterRESTStorage{
+		connectHandler: &SimpleConnectHandler{
+			response: responseText,
+		},
+	}
+	storage := map[string]rest.Storage{
+		"simple":         &SimpleRESTStorage{},
+		"simple/connect": connectStorage,
+	}
+	handler := handle(storage)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/api/version/simple/" + itemID + "/connect")
+
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("unexpected response: %#v", resp)
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if connectStorage.receivedID != itemID {
+		t.Errorf("Unexpected item id. Expected: %s. Actual: %s.", itemID, connectStorage.receivedID)
+	}
+	if string(body) != responseText {
+		t.Errorf("Unexpected response. Expected: %s. Actual: %s.", responseText, string(body))
+	}
+}
+
+func TestConnectWithOptions(t *testing.T) {
+	responseText := "Hello World"
+	itemID := "theID"
+	connectStorage := &ConnecterRESTStorage{
+		connectHandler: &SimpleConnectHandler{
+			response: responseText,
+		},
+		emptyConnectOptions: &SimpleGetOptions{},
+	}
+	storage := map[string]rest.Storage{
+		"simple":         &SimpleRESTStorage{},
+		"simple/connect": connectStorage,
+	}
+	handler := handle(storage)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/api/version/simple/" + itemID + "/connect?param1=value1&param2=value2")
+
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("unexpected response: %#v", resp)
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if connectStorage.receivedID != itemID {
+		t.Errorf("Unexpected item id. Expected: %s. Actual: %s.", itemID, connectStorage.receivedID)
+	}
+	if string(body) != responseText {
+		t.Errorf("Unexpected response. Expected: %s. Actual: %s.", responseText, string(body))
+	}
+	opts, ok := connectStorage.receivedConnectOptions.(*SimpleGetOptions)
+	if !ok {
+		t.Errorf("Unexpected options type: %#v", connectStorage.receivedConnectOptions)
+	}
+	if opts.Param1 != "value1" && opts.Param2 != "value2" {
+		t.Errorf("Unexpected options value: %#v", opts)
+	}
+}
+
+func TestConnectWithOptionsAndPath(t *testing.T) {
+	responseText := "Hello World"
+	itemID := "theID"
+	testPath := "a/b/c/def"
+	connectStorage := &ConnecterRESTStorage{
+		connectHandler: &SimpleConnectHandler{
+			response: responseText,
+		},
+		emptyConnectOptions: &SimpleGetOptions{},
+		takesPath:           "atAPath",
+	}
+	storage := map[string]rest.Storage{
+		"simple":         &SimpleRESTStorage{},
+		"simple/connect": connectStorage,
+	}
+	handler := handle(storage)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/api/version/simple/" + itemID + "/connect/" + testPath + "?param1=value1&param2=value2")
+
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("unexpected response: %#v", resp)
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if connectStorage.receivedID != itemID {
+		t.Errorf("Unexpected item id. Expected: %s. Actual: %s.", itemID, connectStorage.receivedID)
+	}
+	if string(body) != responseText {
+		t.Errorf("Unexpected response. Expected: %s. Actual: %s.", responseText, string(body))
+	}
+	opts, ok := connectStorage.receivedConnectOptions.(*SimpleGetOptions)
+	if !ok {
+		t.Errorf("Unexpected options type: %#v", connectStorage.receivedConnectOptions)
+	}
+	if opts.Param1 != "value1" && opts.Param2 != "value2" {
+		t.Errorf("Unexpected options value: %#v", opts)
+	}
+	if opts.Path != testPath {
+		t.Errorf("Unexpected path value. Expected: %s. Actual: %s.", testPath, opts.Path)
 	}
 }
 
@@ -1159,6 +1528,7 @@ func TestPatch(t *testing.T) {
 
 	client := http.Client{}
 	request, err := http.NewRequest("PATCH", server.URL+"/api/version/simple/"+ID, bytes.NewReader([]byte(`{"labels":{"foo":"bar"}}`)))
+	request.Header.Set("Content-Type", "application/merge-patch+json")
 	_, err = client.Do(request)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -1190,6 +1560,7 @@ func TestPatchRequiresMatchingName(t *testing.T) {
 
 	client := http.Client{}
 	request, err := http.NewRequest("PATCH", server.URL+"/api/version/simple/"+ID, bytes.NewReader([]byte(`{"metadata":{"name":"idbar"}}`)))
+	request.Header.Set("Content-Type", "application/merge-patch+json")
 	response, err := client.Do(request)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -1495,6 +1866,109 @@ func TestCreateChecksDecode(t *testing.T) {
 	}
 	if b, _ := ioutil.ReadAll(response.Body); !strings.Contains(string(b), "must be of type Simple") {
 		t.Errorf("unexpected response: %s", string(b))
+	}
+}
+
+func TestParentResourceIsRequired(t *testing.T) {
+	storage := &SimpleTypedStorage{
+		baseType: &SimpleRoot{}, // a root scoped type
+		item:     &SimpleRoot{},
+	}
+	group := &APIGroupVersion{
+		Storage: map[string]rest.Storage{
+			"simple/sub": storage,
+		},
+		Root:      "/api",
+		Creater:   api.Scheme,
+		Convertor: api.Scheme,
+		Typer:     api.Scheme,
+		Linker:    selfLinker,
+
+		Admit:   admissionControl,
+		Context: requestContextMapper,
+		Mapper:  namespaceMapper,
+
+		Version:       testVersion2,
+		ServerVersion: "v1beta3",
+		Codec:         codec,
+	}
+	container := restful.NewContainer()
+	if err := group.InstallREST(container); err == nil {
+		t.Fatal("expected error")
+	}
+
+	storage = &SimpleTypedStorage{
+		baseType: &SimpleRoot{}, // a root scoped type
+		item:     &SimpleRoot{},
+	}
+	group = &APIGroupVersion{
+		Storage: map[string]rest.Storage{
+			"simple":     &SimpleRESTStorage{},
+			"simple/sub": storage,
+		},
+		Root:      "/api",
+		Creater:   api.Scheme,
+		Convertor: api.Scheme,
+		Typer:     api.Scheme,
+		Linker:    selfLinker,
+
+		Admit:   admissionControl,
+		Context: requestContextMapper,
+		Mapper:  namespaceMapper,
+
+		Version:       testVersion2,
+		ServerVersion: "v1beta3",
+		Codec:         codec,
+	}
+	container = restful.NewContainer()
+	if err := group.InstallREST(container); err != nil {
+		t.Fatal(err)
+	}
+
+	// resource is NOT registered in the root scope
+	w := httptest.NewRecorder()
+	container.ServeHTTP(w, &http.Request{Method: "GET", URL: &url.URL{Path: "/api/simple/test/sub"}})
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected not found: %#v", w)
+	}
+
+	// resource is registered in the namespace scope
+	w = httptest.NewRecorder()
+	container.ServeHTTP(w, &http.Request{Method: "GET", URL: &url.URL{Path: "/api/version2/namespaces/test/simple/test/sub"}})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected OK: %#v", w)
+	}
+	if storage.actualNamespace != "test" {
+		t.Errorf("namespace should be set %#v", storage)
+	}
+}
+
+func TestCreateWithName(t *testing.T) {
+	pathName := "helloworld"
+	storage := &NamedCreaterRESTStorage{SimpleRESTStorage: &SimpleRESTStorage{}}
+	handler := handle(map[string]rest.Storage{
+		"simple":     &SimpleRESTStorage{},
+		"simple/sub": storage,
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	client := http.Client{}
+
+	simple := &Simple{Other: "foo"}
+	data, _ := codec.Encode(simple)
+	request, err := http.NewRequest("POST", server.URL+"/api/version/simple/"+pathName+"/sub", bytes.NewBuffer(data))
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if response.StatusCode != http.StatusCreated {
+		t.Errorf("Unexpected response %#v", response)
+	}
+	if storage.createdName != pathName {
+		t.Errorf("Did not get expected name in create context. Got: %s, Expected: %s", storage.createdName, pathName)
 	}
 }
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,11 +21,11 @@ import (
 	"io"
 	"time"
 
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/controller"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/cmd/util"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/wait"
 	"github.com/spf13/cobra"
+
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl"
+	cmdutil "github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/cmd/util"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/resource"
 )
 
 const (
@@ -41,11 +41,11 @@ $ kubectl resize --replicas=3 replicationcontrollers foo
 // If the replication controller named foo's current size is 2, resize foo to 3.
 $ kubectl resize --current-replicas=2 --replicas=3 replicationcontrollers foo`
 
-	retryFrequency = controller.DefaultSyncPeriod / 100
+	retryFrequency = 100 * time.Millisecond
 	retryTimeout   = 10 * time.Second
 )
 
-func (f *Factory) NewCmdResize(out io.Writer) *cobra.Command {
+func NewCmdResize(f *cmdutil.Factory, out io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "resize [--resource-version=version] [--current-replicas=count] --replicas=COUNT RESOURCE ID",
 		Short:   "Set a new size for a Replication Controller.",
@@ -53,19 +53,20 @@ func (f *Factory) NewCmdResize(out io.Writer) *cobra.Command {
 		Example: resize_example,
 		Run: func(cmd *cobra.Command, args []string) {
 			err := RunResize(f, out, cmd, args)
-			util.CheckErr(err)
+			cmdutil.CheckErr(err)
 		},
 	}
 	cmd.Flags().String("resource-version", "", "Precondition for resource version. Requires that the current resource version match this value in order to resize.")
 	cmd.Flags().Int("current-replicas", -1, "Precondition for current size. Requires that the current size of the replication controller match this value in order to resize.")
 	cmd.Flags().Int("replicas", -1, "The new desired number of replicas. Required.")
+	cmd.MarkFlagRequired("replicas")
 	return cmd
 }
 
-func RunResize(f *Factory, out io.Writer, cmd *cobra.Command, args []string) error {
-	count := util.GetFlagInt(cmd, "replicas")
+func RunResize(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []string) error {
+	count := cmdutil.GetFlagInt(cmd, "replicas")
 	if len(args) != 2 || count < 0 {
-		return util.UsageError(cmd, "--replicas=COUNT RESOURCE ID")
+		return cmdutil.UsageError(cmd, "--replicas=COUNT RESOURCE ID")
 	}
 
 	cmdNamespace, err := f.DefaultNamespace()
@@ -73,30 +74,41 @@ func RunResize(f *Factory, out io.Writer, cmd *cobra.Command, args []string) err
 		return err
 	}
 
-	mapper, _ := f.Object()
-	// TODO: use resource.Builder instead
-	mapping, namespace, name, err := util.ResourceFromArgs(cmd, args, mapper, cmdNamespace)
+	mapper, typer := f.Object()
+	r := resource.NewBuilder(mapper, typer, f.ClientMapperForCommand()).
+		ContinueOnError().
+		NamespaceParam(cmdNamespace).DefaultNamespace().
+		ResourceTypeOrNameArgs(false, args...).
+		Flatten().
+		Do()
+	err = r.Err()
 	if err != nil {
 		return err
 	}
+	mapping, err := r.ResourceMapping()
+	if err != nil {
+		return err
+	}
+
+	infos, err := r.Infos()
+	if err != nil {
+		return err
+	}
+	info := infos[0]
 
 	resizer, err := f.Resizer(mapping)
 	if err != nil {
 		return err
 	}
 
-	resourceVersion := util.GetFlagString(cmd, "resource-version")
-	currentSize := util.GetFlagInt(cmd, "current-replicas")
+	resourceVersion := cmdutil.GetFlagString(cmd, "resource-version")
+	currentSize := cmdutil.GetFlagInt(cmd, "current-replicas")
 	precondition := &kubectl.ResizePrecondition{currentSize, resourceVersion}
-	cond := kubectl.ResizeCondition(resizer, precondition, namespace, name, uint(count))
+	retry := &kubectl.RetryParams{Interval: retryFrequency, Timeout: retryTimeout}
 
-	msg := "resized"
-	if err = wait.Poll(retryFrequency, retryTimeout, cond); err != nil {
-		msg = fmt.Sprintf("Failed to resize controller in spite of retrying for %s", retryTimeout)
-		if err != nil {
-			return err
-		}
+	if err := resizer.Resize(info.Namespace, info.Name, uint(count), precondition, retry, nil); err != nil {
+		return err
 	}
-	fmt.Fprintf(out, "%s\n", msg)
+	fmt.Fprint(out, "resized\n")
 	return nil
 }

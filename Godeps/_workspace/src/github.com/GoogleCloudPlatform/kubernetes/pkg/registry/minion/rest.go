@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,12 +24,14 @@ import (
 	"strconv"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/validation"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/fields"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/generic"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/fielderrors"
 )
 
@@ -56,25 +58,47 @@ func (nodeStrategy) AllowCreateOnUpdate() bool {
 // PrepareForCreate clears fields that are not allowed to be set by end users on creation.
 func (nodeStrategy) PrepareForCreate(obj runtime.Object) {
 	_ = obj.(*api.Node)
-	// Nodes allow *all* fields, including status, to be set.
+	// Nodes allow *all* fields, including status, to be set on create.
 }
 
 // PrepareForUpdate clears fields that are not allowed to be set by end users on update.
 func (nodeStrategy) PrepareForUpdate(obj, old runtime.Object) {
-	_ = obj.(*api.Node)
-	_ = old.(*api.Node)
-	// Nodes allow *all* fields, including status, to be set.
+	newNode := obj.(*api.Node)
+	oldNode := old.(*api.Node)
+	newNode.Status = oldNode.Status
 }
 
 // Validate validates a new node.
-func (nodeStrategy) Validate(obj runtime.Object) fielderrors.ValidationErrorList {
+func (nodeStrategy) Validate(ctx api.Context, obj runtime.Object) fielderrors.ValidationErrorList {
 	node := obj.(*api.Node)
-	return validation.ValidateMinion(node)
+	return validation.ValidateNode(node)
 }
 
 // ValidateUpdate is the default update validation for an end user.
-func (nodeStrategy) ValidateUpdate(obj, old runtime.Object) fielderrors.ValidationErrorList {
-	return validation.ValidateMinionUpdate(old.(*api.Node), obj.(*api.Node))
+func (nodeStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
+	errorList := validation.ValidateNode(obj.(*api.Node))
+	return append(errorList, validation.ValidateNodeUpdate(old.(*api.Node), obj.(*api.Node))...)
+}
+
+type nodeStatusStrategy struct {
+	nodeStrategy
+}
+
+var StatusStrategy = nodeStatusStrategy{Strategy}
+
+func (nodeStatusStrategy) PrepareForCreate(obj runtime.Object) {
+	_ = obj.(*api.Node)
+	// Nodes allow *all* fields, including status, to be set on create.
+}
+
+func (nodeStatusStrategy) PrepareForUpdate(obj, old runtime.Object) {
+	newNode := obj.(*api.Node)
+	oldNode := old.(*api.Node)
+	newNode.Spec = oldNode.Spec
+}
+
+func (nodeStatusStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
+	return validation.ValidateNodeUpdate(old.(*api.Node), obj.(*api.Node))
 }
 
 // ResourceGetter is an interface for retrieving resources by ResourceLocation.
@@ -82,26 +106,46 @@ type ResourceGetter interface {
 	Get(api.Context, string) (runtime.Object, error)
 }
 
+// NodeToSelectableFields returns a label set that represents the object.
+func NodeToSelectableFields(node *api.Node) fields.Set {
+	return fields.Set{
+		"metadata.name":      node.Name,
+		"spec.unschedulable": fmt.Sprint(node.Spec.Unschedulable),
+	}
+}
+
 // MatchNode returns a generic matcher for a given label and field selector.
 func MatchNode(label labels.Selector, field fields.Selector) generic.Matcher {
-	return generic.MatcherFunc(func(obj runtime.Object) (bool, error) {
-		nodeObj, ok := obj.(*api.Node)
-		if !ok {
-			return false, fmt.Errorf("not a node")
-		}
-		// TODO: Add support for filtering based on field, once NodeStatus is defined.
-		return label.Matches(labels.Set(nodeObj.Labels)), nil
-	})
+	return &generic.SelectionPredicate{
+		Label: label,
+		Field: field,
+		GetAttrs: func(obj runtime.Object) (labels.Set, fields.Set, error) {
+			nodeObj, ok := obj.(*api.Node)
+			if !ok {
+				return nil, nil, fmt.Errorf("not a node")
+			}
+			return labels.Set(nodeObj.ObjectMeta.Labels), NodeToSelectableFields(nodeObj), nil
+		},
+	}
 }
 
 // ResourceLocation returns a URL to which one can send traffic for the specified node.
 func ResourceLocation(getter ResourceGetter, connection client.ConnectionInfoGetter, ctx api.Context, id string) (*url.URL, http.RoundTripper, error) {
-	nodeObj, err := getter.Get(ctx, id)
+	name, portReq, valid := util.SplitPort(id)
+	if !valid {
+		return nil, nil, errors.NewBadRequest(fmt.Sprintf("invalid node request %q", id))
+	}
+
+	nodeObj, err := getter.Get(ctx, name)
 	if err != nil {
 		return nil, nil, err
 	}
 	node := nodeObj.(*api.Node)
-	host := node.Name
+	host := node.Name // TODO: use node's IP, don't expect the name to resolve.
+
+	if portReq != "" {
+		return &url.URL{Host: net.JoinHostPort(host, portReq)}, nil, nil
+	}
 
 	scheme, port, transport, err := connection.GetConnectionInfo(host)
 	if err != nil {

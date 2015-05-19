@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,24 +22,24 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/cmd/util"
+	cmdutil "github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/cmd/util"
 )
 
-func (f *Factory) NewCmdVersion(out io.Writer) *cobra.Command {
+func NewCmdVersion(f *cmdutil.Factory, out io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print the client and server version information.",
 		Run: func(cmd *cobra.Command, args []string) {
 			err := RunVersion(f, out, cmd)
-			util.CheckErr(err)
+			cmdutil.CheckErr(err)
 		},
 	}
 	cmd.Flags().BoolP("client", "c", false, "Client version only (no server required).")
 	return cmd
 }
 
-func RunVersion(f *Factory, out io.Writer, cmd *cobra.Command) error {
-	if util.GetFlagBool(cmd, "client") {
+func RunVersion(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command) error {
+	if cmdutil.GetFlagBool(cmd, "client") {
 		kubectl.GetClientVersion(out)
 		return nil
 	}

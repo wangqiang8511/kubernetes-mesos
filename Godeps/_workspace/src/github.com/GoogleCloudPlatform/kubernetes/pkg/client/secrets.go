@@ -1,5 +1,5 @@
 /*
-Copyright 2015 Google Inc. All rights reserved.
+Copyright 2015 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -53,7 +53,7 @@ func newSecrets(c *Client, ns string) *secrets {
 func (s *secrets) Create(secret *api.Secret) (*api.Secret, error) {
 	result := &api.Secret{}
 	err := s.client.Post().
-		Namespace(secret.Namespace).
+		Namespace(s.namespace).
 		Resource("secrets").
 		Body(secret).
 		Do().
@@ -69,8 +69,8 @@ func (s *secrets) List(label labels.Selector, field fields.Selector) (*api.Secre
 	err := s.client.Get().
 		Namespace(s.namespace).
 		Resource("secrets").
-		LabelsSelectorParam(api.LabelSelectorQueryParam(s.client.APIVersion()), label).
-		FieldsSelectorParam(api.FieldSelectorQueryParam(s.client.APIVersion()), field).
+		LabelsSelectorParam(label).
+		FieldsSelectorParam(field).
 		Do().
 		Into(result)
 
@@ -97,8 +97,8 @@ func (s *secrets) Watch(label labels.Selector, field fields.Selector, resourceVe
 		Namespace(s.namespace).
 		Resource("secrets").
 		Param("resourceVersion", resourceVersion).
-		LabelsSelectorParam(api.LabelSelectorQueryParam(s.client.APIVersion()), label).
-		FieldsSelectorParam(api.FieldSelectorQueryParam(s.client.APIVersion()), field).
+		LabelsSelectorParam(label).
+		FieldsSelectorParam(field).
 		Watch()
 }
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,15 +19,15 @@ package git_repo
 import (
 	"fmt"
 	"io/ioutil"
-	"os"
 	"path"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/types"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/exec"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/mount"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/volume"
-	"github.com/golang/glog"
+	volumeutil "github.com/GoogleCloudPlatform/kubernetes/pkg/volume/util"
 )
 
 // This is the primary entrypoint for volume plugins.
@@ -58,44 +58,44 @@ func (plugin *gitRepoPlugin) Name() string {
 	return gitRepoPluginName
 }
 
-func (plugin *gitRepoPlugin) CanSupport(spec *api.Volume) bool {
+func (plugin *gitRepoPlugin) CanSupport(spec *volume.Spec) bool {
 	if plugin.legacyMode {
 		// Legacy mode instances can be cleaned up but not created anew.
 		return false
 	}
 
-	if spec.GitRepo != nil {
-		return true
-	}
-	return false
+	return spec.VolumeSource.GitRepo != nil
 }
 
-func (plugin *gitRepoPlugin) NewBuilder(spec *api.Volume, podRef *api.ObjectReference) (volume.Builder, error) {
+func (plugin *gitRepoPlugin) NewBuilder(spec *volume.Spec, pod *api.Pod, opts volume.VolumeOptions, mounter mount.Interface) (volume.Builder, error) {
 	if plugin.legacyMode {
 		// Legacy mode instances can be cleaned up but not created anew.
 		return nil, fmt.Errorf("legacy mode: can not create new instances")
 	}
 	return &gitRepo{
-		podRef:     *podRef,
+		pod:        *pod,
 		volName:    spec.Name,
-		source:     spec.GitRepo.Repository,
-		revision:   spec.GitRepo.Revision,
+		source:     spec.VolumeSource.GitRepo.Repository,
+		revision:   spec.VolumeSource.GitRepo.Revision,
 		exec:       exec.New(),
 		plugin:     plugin,
 		legacyMode: false,
+		opts:       opts,
+		mounter:    mounter,
 	}, nil
 }
 
-func (plugin *gitRepoPlugin) NewCleaner(volName string, podUID types.UID) (volume.Cleaner, error) {
+func (plugin *gitRepoPlugin) NewCleaner(volName string, podUID types.UID, mounter mount.Interface) (volume.Cleaner, error) {
 	legacy := false
 	if plugin.legacyMode {
 		legacy = true
 	}
 	return &gitRepo{
-		podRef:     api.ObjectReference{UID: podUID},
+		pod:        api.Pod{ObjectMeta: api.ObjectMeta{UID: podUID}},
 		volName:    volName,
 		plugin:     plugin,
 		legacyMode: legacy,
+		mounter:    mounter,
 	}, nil
 }
 
@@ -103,12 +103,14 @@ func (plugin *gitRepoPlugin) NewCleaner(volName string, podUID types.UID) (volum
 // These do not persist beyond the lifetime of a pod.
 type gitRepo struct {
 	volName    string
-	podRef     api.ObjectReference
+	pod        api.Pod
 	source     string
 	revision   string
 	exec       exec.Interface
 	plugin     *gitRepoPlugin
 	legacyMode bool
+	opts       volume.VolumeOptions
+	mounter    mount.Interface
 }
 
 // SetUp creates new directory and clones a git repo.
@@ -117,14 +119,14 @@ func (gr *gitRepo) SetUp() error {
 }
 
 // This is the spec for the volume that this plugin wraps.
-var wrappedVolumeSpec = &api.Volume{
+var wrappedVolumeSpec = &volume.Spec{
 	Name:         "not-used",
 	VolumeSource: api.VolumeSource{EmptyDir: &api.EmptyDirVolumeSource{}},
 }
 
 // SetUpAt creates new directory and clones a git repo.
 func (gr *gitRepo) SetUpAt(dir string) error {
-	if gr.isReady() {
+	if volumeutil.IsReady(gr.getMetaDir()) {
 		return nil
 	}
 	if gr.legacyMode {
@@ -132,7 +134,7 @@ func (gr *gitRepo) SetUpAt(dir string) error {
 	}
 
 	// Wrap EmptyDir, let it do the setup.
-	wrapped, err := gr.plugin.host.NewWrapperBuilder(wrappedVolumeSpec, &gr.podRef)
+	wrapped, err := gr.plugin.host.NewWrapperBuilder(wrappedVolumeSpec, &gr.pod, gr.opts, gr.mounter)
 	if err != nil {
 		return err
 	}
@@ -153,7 +155,7 @@ func (gr *gitRepo) SetUpAt(dir string) error {
 	}
 	if len(gr.revision) == 0 {
 		// Done!
-		gr.setReady()
+		volumeutil.SetReady(gr.getMetaDir())
 		return nil
 	}
 
@@ -165,41 +167,12 @@ func (gr *gitRepo) SetUpAt(dir string) error {
 		return fmt.Errorf("failed to exec 'git reset --hard': %s: %v", output, err)
 	}
 
-	gr.setReady()
+	volumeutil.SetReady(gr.getMetaDir())
 	return nil
 }
 
 func (gr *gitRepo) getMetaDir() string {
-	return path.Join(gr.plugin.host.GetPodPluginDir(gr.podRef.UID, util.EscapeQualifiedNameForDisk(gitRepoPluginName)), gr.volName)
-}
-
-func (gr *gitRepo) isReady() bool {
-	metaDir := gr.getMetaDir()
-	readyFile := path.Join(metaDir, "ready")
-	s, err := os.Stat(readyFile)
-	if err != nil {
-		return false
-	}
-	if !s.Mode().IsRegular() {
-		glog.Errorf("GitRepo ready-file is not a file: %s", readyFile)
-		return false
-	}
-	return true
-}
-
-func (gr *gitRepo) setReady() {
-	metaDir := gr.getMetaDir()
-	if err := os.MkdirAll(metaDir, 0750); err != nil && !os.IsExist(err) {
-		glog.Errorf("Can't mkdir %s: %v", metaDir, err)
-		return
-	}
-	readyFile := path.Join(metaDir, "ready")
-	file, err := os.Create(readyFile)
-	if err != nil {
-		glog.Errorf("Can't touch %s: %v", readyFile, err)
-		return
-	}
-	file.Close()
+	return path.Join(gr.plugin.host.GetPodPluginDir(gr.pod.UID, util.EscapeQualifiedNameForDisk(gitRepoPluginName)), gr.volName)
 }
 
 func (gr *gitRepo) execCommand(command string, args []string, dir string) ([]byte, error) {
@@ -213,7 +186,7 @@ func (gr *gitRepo) GetPath() string {
 	if gr.legacyMode {
 		name = gitRepoPluginLegacyName
 	}
-	return gr.plugin.host.GetPodVolumeDir(gr.podRef.UID, util.EscapeQualifiedNameForDisk(name), gr.volName)
+	return gr.plugin.host.GetPodVolumeDir(gr.pod.UID, util.EscapeQualifiedNameForDisk(name), gr.volName)
 }
 
 // TearDown simply deletes everything in the directory.
@@ -224,7 +197,7 @@ func (gr *gitRepo) TearDown() error {
 // TearDownAt simply deletes everything in the directory.
 func (gr *gitRepo) TearDownAt(dir string) error {
 	// Wrap EmptyDir, let it do the teardown.
-	wrapped, err := gr.plugin.host.NewWrapperCleaner(wrappedVolumeSpec, gr.podRef.UID)
+	wrapped, err := gr.plugin.host.NewWrapperCleaner(wrappedVolumeSpec, gr.pod.UID, gr.mounter)
 	if err != nil {
 		return err
 	}

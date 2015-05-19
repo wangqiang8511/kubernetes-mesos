@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,12 +30,15 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/admission"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	apierrors "github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/meta"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/rest"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/healthz"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/errors"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/flushwriter"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/version"
 
 	"github.com/emicklei/go-restful"
@@ -49,31 +52,40 @@ var (
 	requestCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "apiserver_request_count",
-			Help: "Counter of apiserver requests broken out for each request handler, verb, API resource, and HTTP response code.",
+			Help: "Counter of apiserver requests broken out for each verb, API resource, client, and HTTP response code.",
 		},
-		[]string{"handler", "verb", "resource", "code"},
+		[]string{"verb", "resource", "client", "code"},
 	)
 	requestLatencies = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "apiserver_request_latencies",
-			Help: "Response latency distribution in microseconds for each request handler and verb.",
+			Help: "Response latency distribution in microseconds for each verb, resource and client.",
 			// Use buckets ranging from 125 ms to 8 seconds.
 			Buckets: prometheus.ExponentialBuckets(125000, 2.0, 7),
 		},
-		[]string{"handler", "verb"},
+		[]string{"verb", "resource", "client"},
+	)
+	requestLatenciesSummary = prometheus.NewSummaryVec(
+		prometheus.SummaryOpts{
+			Name: "apiserver_request_latencies_summary",
+			Help: "Response latency summary in microseconds for each verb and resource.",
+		},
+		[]string{"verb", "resource"},
 	)
 )
 
 func init() {
 	prometheus.MustRegister(requestCounter)
 	prometheus.MustRegister(requestLatencies)
+	prometheus.MustRegister(requestLatenciesSummary)
 }
 
 // monitor is a helper function for each HTTP request handler to use for
 // instrumenting basic request counter and latency metrics.
-func monitor(handler string, verb, resource *string, httpCode *int, reqStart time.Time) {
-	requestCounter.WithLabelValues(handler, *verb, *resource, strconv.Itoa(*httpCode)).Inc()
-	requestLatencies.WithLabelValues(handler, *verb).Observe(float64((time.Since(reqStart)) / time.Microsecond))
+func monitor(verb, resource *string, client string, httpCode *int, reqStart time.Time) {
+	requestCounter.WithLabelValues(*verb, *resource, client, strconv.Itoa(*httpCode)).Inc()
+	requestLatencies.WithLabelValues(*verb, *resource, client).Observe(float64((time.Since(reqStart)) / time.Microsecond))
+	requestLatenciesSummary.WithLabelValues(*verb, *resource).Observe(float64((time.Since(reqStart)) / time.Microsecond))
 }
 
 // monitorFilter creates a filter that reports the metrics for a given resource and action.
@@ -82,7 +94,7 @@ func monitorFilter(action, resource string) restful.FilterFunction {
 		reqStart := time.Now()
 		chain.ProcessFilter(req, res)
 		httpCode := res.StatusCode()
-		monitor("rest", &action, &resource, &httpCode, reqStart)
+		monitor(&action, &resource, util.GetClient(req.Request), &httpCode, reqStart)
 	}
 }
 
@@ -137,16 +149,10 @@ func (g *APIGroupVersion) InstallREST(container *restful.Container) error {
 	return errors.NewAggregate(registrationErrors)
 }
 
-// TODO: Convert to go-restful
+// TODO: This endpoint is deprecated and should be removed at some point.
+// Use "componentstatus" API instead.
 func InstallValidator(mux Mux, servers func() map[string]Server) {
-	validator, err := NewValidator(servers)
-	if err != nil {
-		glog.Errorf("failed to set up validator: %v", err)
-		return
-	}
-	if validator != nil {
-		mux.Handle("/validate", validator)
-	}
+	mux.Handle("/validate", NewValidator(servers))
 }
 
 // TODO: document all handlers
@@ -172,6 +178,29 @@ func InstallLogsSupport(mux Mux) {
 	// TODO: use restful: ws.Route(ws.GET("/logs/{logpath:*}").To(fileHandler))
 	// See github.com/emicklei/go-restful/blob/master/examples/restful-serve-static.go
 	mux.Handle("/logs/", http.StripPrefix("/logs/", http.FileServer(http.Dir("/var/log/"))))
+}
+
+func InstallServiceErrorHandler(container *restful.Container, requestResolver *APIRequestInfoResolver, apiVersions []string) {
+	container.ServiceErrorHandler(func(serviceErr restful.ServiceError, request *restful.Request, response *restful.Response) {
+		serviceErrorHandler(requestResolver, apiVersions, serviceErr, request, response)
+	})
+}
+
+func serviceErrorHandler(requestResolver *APIRequestInfoResolver, apiVersions []string, serviceErr restful.ServiceError, request *restful.Request, response *restful.Response) {
+	requestInfo, err := requestResolver.GetAPIRequestInfo(request.Request)
+	codec := latest.Codec
+	if err == nil && requestInfo.APIVersion != "" {
+		// check if the api version is valid.
+		for _, version := range apiVersions {
+			if requestInfo.APIVersion == version {
+				// valid api version.
+				codec = runtime.CodecFor(api.Scheme, requestInfo.APIVersion)
+				break
+			}
+		}
+	}
+
+	errorJSON(apierrors.NewGenericServerResponse(serviceErr.Code, "", "", "", "", 0, false), codec, response.ResponseWriter)
 }
 
 // Adds a service to return the supported api versions.
@@ -211,9 +240,14 @@ func APIVersionHandler(versions ...string) restful.RouteFunction {
 // be "application/octet-stream". All other objects are sent to standard JSON serialization.
 func write(statusCode int, apiVersion string, codec runtime.Codec, object runtime.Object, w http.ResponseWriter, req *http.Request) {
 	if stream, ok := object.(rest.ResourceStreamer); ok {
-		out, contentType, err := stream.InputStream(apiVersion, req.Header.Get("Accept"))
+		out, flush, contentType, err := stream.InputStream(apiVersion, req.Header.Get("Accept"))
 		if err != nil {
 			errorJSONFatal(err, codec, w)
+			return
+		}
+		if out == nil {
+			// No output provided - return StatusNoContent
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		defer out.Close()
@@ -222,7 +256,11 @@ func write(statusCode int, apiVersion string, codec runtime.Codec, object runtim
 		}
 		w.Header().Set("Content-Type", contentType)
 		w.WriteHeader(statusCode)
-		io.Copy(w, out)
+		writer := w.(io.Writer)
+		if flush {
+			writer = flushwriter.Wrap(w)
+		}
+		io.Copy(writer, out)
 		return
 	}
 	writeJSON(statusCode, codec, object, w)

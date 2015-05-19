@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ import (
 	// Cloud providers
 	_ "github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/aws"
 	_ "github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/gce"
+	_ "github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/mesos"
 	_ "github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/openstack"
 	_ "github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/ovirt"
 	_ "github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/rackspace"
@@ -35,6 +36,7 @@ import (
 	_ "github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/admission/namespace/autoprovision"
 	_ "github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/admission/namespace/exists"
 	_ "github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/admission/namespace/lifecycle"
-	_ "github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/admission/resourcedefaults"
 	_ "github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/admission/resourcequota"
+	_ "github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/admission/securitycontext/scdeny"
+	_ "github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/admission/serviceaccount"
 )

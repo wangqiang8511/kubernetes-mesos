@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,23 +17,32 @@ limitations under the License.
 package admission
 
 import (
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/auth/user"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 )
 
 type attributesRecord struct {
+	kind      string
 	namespace string
 	resource  string
 	operation string
 	object    runtime.Object
+	userInfo  user.Info
 }
 
-func NewAttributesRecord(object runtime.Object, namespace, resource, operation string) Attributes {
+func NewAttributesRecord(object runtime.Object, kind, namespace, resource, operation string, userInfo user.Info) Attributes {
 	return &attributesRecord{
+		kind:      kind,
 		namespace: namespace,
 		resource:  resource,
 		operation: operation,
 		object:    object,
+		userInfo:  userInfo,
 	}
+}
+
+func (record *attributesRecord) GetKind() string {
+	return record.kind
 }
 
 func (record *attributesRecord) GetNamespace() string {
@@ -50,4 +59,8 @@ func (record *attributesRecord) GetOperation() string {
 
 func (record *attributesRecord) GetObject() runtime.Object {
 	return record.object
+}
+
+func (record *attributesRecord) GetUserInfo() user.Info {
+	return record.userInfo
 }

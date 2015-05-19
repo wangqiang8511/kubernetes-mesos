@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -46,7 +46,7 @@ func NewDecoder(r io.ReadCloser, codec runtime.Codec) *Decoder {
 // Decode blocks until it can return the next object in the writer. Returns an error
 // if the writer is closed or an object can't be decoded.
 func (d *Decoder) Decode() (watch.EventType, runtime.Object, error) {
-	var got watchEvent
+	var got WatchEvent
 	if err := d.decoder.Decode(&got); err != nil {
 		return "", nil, err
 	}

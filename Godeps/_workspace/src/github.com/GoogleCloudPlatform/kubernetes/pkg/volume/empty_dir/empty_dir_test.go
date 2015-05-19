@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -48,11 +48,11 @@ func TestCanSupport(t *testing.T) {
 	if plug.Name() != "kubernetes.io/empty-dir" {
 		t.Errorf("Wrong name: %s", plug.Name())
 	}
-	if !plug.CanSupport(&api.Volume{VolumeSource: api.VolumeSource{EmptyDir: &api.EmptyDirVolumeSource{}}}) {
+	if !plug.CanSupport(&volume.Spec{Name: "foo", VolumeSource: api.VolumeSource{EmptyDir: &api.EmptyDirVolumeSource{}}}) {
 		t.Errorf("Expected true")
 	}
-	if !plug.CanSupport(&api.Volume{VolumeSource: api.VolumeSource{}}) {
-		t.Errorf("Expected true")
+	if plug.CanSupport(&volume.Spec{Name: "foo", VolumeSource: api.VolumeSource{}}) {
+		t.Errorf("Expected false")
 	}
 }
 
@@ -70,16 +70,17 @@ func TestPlugin(t *testing.T) {
 
 	spec := &api.Volume{
 		Name:         "vol1",
-		VolumeSource: api.VolumeSource{EmptyDir: &api.EmptyDirVolumeSource{Medium: api.StorageTypeDefault}},
+		VolumeSource: api.VolumeSource{EmptyDir: &api.EmptyDirVolumeSource{Medium: api.StorageMediumDefault}},
 	}
 	mounter := mount.FakeMounter{}
 	mountDetector := fakeMountDetector{}
-	builder, err := plug.(*emptyDirPlugin).newBuilderInternal(spec, &api.ObjectReference{UID: types.UID("poduid")}, &mounter, &mountDetector)
+	pod := &api.Pod{ObjectMeta: api.ObjectMeta{UID: types.UID("poduid")}}
+	builder, err := plug.(*emptyDirPlugin).newBuilderInternal(volume.NewSpecFromVolume(spec), pod, &mounter, &mountDetector, volume.VolumeOptions{""})
 	if err != nil {
 		t.Errorf("Failed to make a new Builder: %v", err)
 	}
 	if builder == nil {
-		t.Errorf("Got a nil Builder: %v")
+		t.Errorf("Got a nil Builder")
 	}
 
 	volPath := builder.GetPath()
@@ -107,7 +108,7 @@ func TestPlugin(t *testing.T) {
 		t.Errorf("Failed to make a new Cleaner: %v", err)
 	}
 	if cleaner == nil {
-		t.Errorf("Got a nil Cleaner: %v")
+		t.Errorf("Got a nil Cleaner")
 	}
 
 	if err := cleaner.TearDown(); err != nil {
@@ -129,16 +130,17 @@ func TestPluginTmpfs(t *testing.T) {
 
 	spec := &api.Volume{
 		Name:         "vol1",
-		VolumeSource: api.VolumeSource{EmptyDir: &api.EmptyDirVolumeSource{Medium: api.StorageTypeMemory}},
+		VolumeSource: api.VolumeSource{EmptyDir: &api.EmptyDirVolumeSource{Medium: api.StorageMediumMemory}},
 	}
 	mounter := mount.FakeMounter{}
 	mountDetector := fakeMountDetector{}
-	builder, err := plug.(*emptyDirPlugin).newBuilderInternal(spec, &api.ObjectReference{UID: types.UID("poduid")}, &mounter, &mountDetector)
+	pod := &api.Pod{ObjectMeta: api.ObjectMeta{UID: types.UID("poduid")}}
+	builder, err := plug.(*emptyDirPlugin).newBuilderInternal(volume.NewSpecFromVolume(spec), pod, &mounter, &mountDetector, volume.VolumeOptions{""})
 	if err != nil {
 		t.Errorf("Failed to make a new Builder: %v", err)
 	}
 	if builder == nil {
-		t.Errorf("Got a nil Builder: %v")
+		t.Errorf("Got a nil Builder")
 	}
 
 	volPath := builder.GetPath()
@@ -170,7 +172,7 @@ func TestPluginTmpfs(t *testing.T) {
 		t.Errorf("Failed to make a new Cleaner: %v", err)
 	}
 	if cleaner == nil {
-		t.Errorf("Got a nil Cleaner: %v")
+		t.Errorf("Got a nil Cleaner")
 	}
 
 	if err := cleaner.TearDown(); err != nil {
@@ -197,12 +199,13 @@ func TestPluginBackCompat(t *testing.T) {
 	spec := &api.Volume{
 		Name: "vol1",
 	}
-	builder, err := plug.NewBuilder(spec, &api.ObjectReference{UID: types.UID("poduid")})
+	pod := &api.Pod{ObjectMeta: api.ObjectMeta{UID: types.UID("poduid")}}
+	builder, err := plug.NewBuilder(volume.NewSpecFromVolume(spec), pod, volume.VolumeOptions{""}, nil)
 	if err != nil {
 		t.Errorf("Failed to make a new Builder: %v", err)
 	}
 	if builder == nil {
-		t.Errorf("Got a nil Builder: %v")
+		t.Errorf("Got a nil Builder")
 	}
 
 	volPath := builder.GetPath()
@@ -217,12 +220,13 @@ func TestPluginLegacy(t *testing.T) {
 	if plug.Name() != "empty" {
 		t.Errorf("Wrong name: %s", plug.Name())
 	}
-	if plug.CanSupport(&api.Volume{VolumeSource: api.VolumeSource{EmptyDir: &api.EmptyDirVolumeSource{}}}) {
+	if plug.CanSupport(&volume.Spec{Name: "foo", VolumeSource: api.VolumeSource{EmptyDir: &api.EmptyDirVolumeSource{}}}) {
 		t.Errorf("Expected false")
 	}
 
 	spec := api.Volume{VolumeSource: api.VolumeSource{EmptyDir: &api.EmptyDirVolumeSource{}}}
-	if _, err := plug.(*emptyDirPlugin).newBuilderInternal(&spec, &api.ObjectReference{UID: types.UID("poduid")}, &mount.FakeMounter{}, &fakeMountDetector{}); err == nil {
+	pod := &api.Pod{ObjectMeta: api.ObjectMeta{UID: types.UID("poduid")}}
+	if _, err := plug.(*emptyDirPlugin).newBuilderInternal(volume.NewSpecFromVolume(&spec), pod, &mount.FakeMounter{}, &fakeMountDetector{}, volume.VolumeOptions{""}); err == nil {
 		t.Errorf("Expected failiure")
 	}
 
@@ -231,6 +235,6 @@ func TestPluginLegacy(t *testing.T) {
 		t.Errorf("Failed to make a new Cleaner: %v", err)
 	}
 	if cleaner == nil {
-		t.Errorf("Got a nil Cleaner: %v")
+		t.Errorf("Got a nil Cleaner")
 	}
 }

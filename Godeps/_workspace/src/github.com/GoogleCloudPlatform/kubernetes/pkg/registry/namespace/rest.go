@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -77,7 +77,7 @@ func (namespaceStrategy) PrepareForUpdate(obj, old runtime.Object) {
 }
 
 // Validate validates a new namespace.
-func (namespaceStrategy) Validate(obj runtime.Object) fielderrors.ValidationErrorList {
+func (namespaceStrategy) Validate(ctx api.Context, obj runtime.Object) fielderrors.ValidationErrorList {
 	namespace := obj.(*api.Namespace)
 	return validation.ValidateNamespace(namespace)
 }
@@ -88,8 +88,9 @@ func (namespaceStrategy) AllowCreateOnUpdate() bool {
 }
 
 // ValidateUpdate is the default update validation for an end user.
-func (namespaceStrategy) ValidateUpdate(obj, old runtime.Object) fielderrors.ValidationErrorList {
-	return validation.ValidateNamespaceUpdate(obj.(*api.Namespace), old.(*api.Namespace))
+func (namespaceStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
+	errorList := validation.ValidateNamespace(obj.(*api.Namespace))
+	return append(errorList, validation.ValidateNamespaceUpdate(obj.(*api.Namespace), old.(*api.Namespace))...)
 }
 
 type namespaceStatusStrategy struct {
@@ -104,7 +105,7 @@ func (namespaceStatusStrategy) PrepareForUpdate(obj, old runtime.Object) {
 	newNamespace.Spec = oldNamespace.Spec
 }
 
-func (namespaceStatusStrategy) ValidateUpdate(obj, old runtime.Object) fielderrors.ValidationErrorList {
+func (namespaceStatusStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
 	return validation.ValidateNamespaceStatusUpdate(obj.(*api.Namespace), old.(*api.Namespace))
 }
 
@@ -114,8 +115,15 @@ type namespaceFinalizeStrategy struct {
 
 var FinalizeStrategy = namespaceFinalizeStrategy{Strategy}
 
-func (namespaceFinalizeStrategy) ValidateUpdate(obj, old runtime.Object) fielderrors.ValidationErrorList {
+func (namespaceFinalizeStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
 	return validation.ValidateNamespaceFinalizeUpdate(obj.(*api.Namespace), old.(*api.Namespace))
+}
+
+// PrepareForUpdate clears fields that are not allowed to be set by end users on update.
+func (namespaceFinalizeStrategy) PrepareForUpdate(obj, old runtime.Object) {
+	newNamespace := obj.(*api.Namespace)
+	oldNamespace := old.(*api.Namespace)
+	newNamespace.Status = oldNamespace.Status
 }
 
 // MatchNamespace returns a generic matcher for a given label and field selector.

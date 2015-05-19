@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@ limitations under the License.
 package nfs
 
 import (
-	"fmt"
 	"os"
 	"testing"
 
@@ -37,10 +36,10 @@ func TestCanSupport(t *testing.T) {
 	if plug.Name() != "kubernetes.io/nfs" {
 		t.Errorf("Wrong name: %s", plug.Name())
 	}
-	if !plug.CanSupport(&api.Volume{VolumeSource: api.VolumeSource{NFS: &api.NFSVolumeSource{}}}) {
+	if !plug.CanSupport(&volume.Spec{Name: "foo", VolumeSource: api.VolumeSource{NFS: &api.NFSVolumeSource{}}}) {
 		t.Errorf("Expected true")
 	}
-	if plug.CanSupport(&api.Volume{VolumeSource: api.VolumeSource{}}) {
+	if plug.CanSupport(&volume.Spec{Name: "foo", VolumeSource: api.VolumeSource{}}) {
 		t.Errorf("Expected false")
 	}
 }
@@ -58,42 +57,13 @@ func TestGetAccessModes(t *testing.T) {
 	}
 }
 
-func contains(modes []api.AccessModeType, mode api.AccessModeType) bool {
+func contains(modes []api.PersistentVolumeAccessMode, mode api.PersistentVolumeAccessMode) bool {
 	for _, m := range modes {
 		if m == mode {
 			return true
 		}
 	}
 	return false
-}
-
-type fakeNFSMounter struct {
-	FakeMounter mount.FakeMounter
-}
-
-func (fake *fakeNFSMounter) Mount(server string, source string, target string, readOnly bool) error {
-	flags := 0
-	if readOnly {
-		flags |= mount.FlagReadOnly
-	}
-	fake.FakeMounter.MountPoints = append(fake.FakeMounter.MountPoints, mount.MountPoint{Device: server, Path: target, Type: "nfs", Opts: nil, Freq: 0, Pass: 0})
-	return fake.FakeMounter.Mount(fmt.Sprintf("%s:%s", server, source), target, "nfs", 0, "")
-}
-
-func (fake *fakeNFSMounter) Unmount(target string) error {
-	fake.FakeMounter.MountPoints = []mount.MountPoint{}
-	return fake.FakeMounter.Unmount(target, 0)
-}
-
-func (fake *fakeNFSMounter) List() ([]mount.MountPoint, error) {
-	list, _ := fake.FakeMounter.List()
-	return list, nil
-}
-
-func (fake *fakeNFSMounter) IsMountPoint(dir string) (bool, error) {
-	list, _ := fake.FakeMounter.List()
-	isMount := len(list) > 0
-	return isMount, nil
 }
 
 func TestPlugin(t *testing.T) {
@@ -107,14 +77,15 @@ func TestPlugin(t *testing.T) {
 		Name:         "vol1",
 		VolumeSource: api.VolumeSource{NFS: &api.NFSVolumeSource{"localhost", "/tmp", false}},
 	}
-	fake := &fakeNFSMounter{}
-	builder, err := plug.(*nfsPlugin).newBuilderInternal(spec, &api.ObjectReference{UID: types.UID("poduid")}, fake)
+	fake := &mount.FakeMounter{}
+	pod := &api.Pod{ObjectMeta: api.ObjectMeta{UID: types.UID("poduid")}}
+	builder, err := plug.(*nfsPlugin).newBuilderInternal(volume.NewSpecFromVolume(spec), pod, fake)
 	volumePath := builder.GetPath()
 	if err != nil {
 		t.Errorf("Failed to make a new Builder: %v", err)
 	}
 	if builder == nil {
-		t.Errorf("Got a nil Builder: %v")
+		t.Errorf("Got a nil Builder")
 	}
 	path := builder.GetPath()
 	if path != "/tmp/fake/pods/poduid/volumes/kubernetes.io~nfs/vol1" {
@@ -133,21 +104,21 @@ func TestPlugin(t *testing.T) {
 	if builder.(*nfs).readOnly {
 		t.Errorf("The volume source should not be read-only and it is.")
 	}
-	if len(fake.FakeMounter.Log) != 1 {
-		t.Errorf("Mount was not called exactly one time. It was called %d times.", len(fake.FakeMounter.Log))
+	if len(fake.Log) != 1 {
+		t.Errorf("Mount was not called exactly one time. It was called %d times.", len(fake.Log))
 	} else {
-		if fake.FakeMounter.Log[0].Action != mount.FakeActionMount {
-			t.Errorf("Unexpected mounter action: %#v", fake.FakeMounter.Log[0])
+		if fake.Log[0].Action != mount.FakeActionMount {
+			t.Errorf("Unexpected mounter action: %#v", fake.Log[0])
 		}
 	}
-	fake.FakeMounter.ResetLog()
+	fake.ResetLog()
 
 	cleaner, err := plug.(*nfsPlugin).newCleanerInternal("vol1", types.UID("poduid"), fake)
 	if err != nil {
 		t.Errorf("Failed to make a new Cleaner: %v", err)
 	}
 	if cleaner == nil {
-		t.Errorf("Got a nil Cleaner: %v")
+		t.Errorf("Got a nil Cleaner")
 	}
 	if err := cleaner.TearDown(); err != nil {
 		t.Errorf("Expected success, got: %v", err)
@@ -157,13 +128,13 @@ func TestPlugin(t *testing.T) {
 	} else if !os.IsNotExist(err) {
 		t.Errorf("SetUp() failed: %v", err)
 	}
-	if len(fake.FakeMounter.Log) != 1 {
-		t.Errorf("Unmount was not called exactly one time. It was called %d times.", len(fake.FakeMounter.Log))
+	if len(fake.Log) != 1 {
+		t.Errorf("Unmount was not called exactly one time. It was called %d times.", len(fake.Log))
 	} else {
-		if fake.FakeMounter.Log[0].Action != mount.FakeActionUnmount {
-			t.Errorf("Unexpected mounter action: %#v", fake.FakeMounter.Log[0])
+		if fake.Log[0].Action != mount.FakeActionUnmount {
+			t.Errorf("Unexpected mounter action: %#v", fake.Log[0])
 		}
 	}
 
-	fake.FakeMounter.ResetLog()
+	fake.ResetLog()
 }

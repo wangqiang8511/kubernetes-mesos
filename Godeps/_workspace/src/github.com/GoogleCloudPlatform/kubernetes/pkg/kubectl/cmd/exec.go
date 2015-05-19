@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,8 +23,9 @@ import (
 	"syscall"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/remotecommand"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/cmd/util"
+	cmdutil "github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/cmd/util"
 	"github.com/docker/docker/pkg/term"
 	"github.com/golang/glog"
 	"github.com/spf13/cobra"
@@ -38,35 +39,54 @@ $ kubectl exec -p 123456-7890 -c ruby-container date
 $ kubectl exec -p 123456-7890 -c ruby-container -i -t -- bash -il`
 )
 
-func (f *Factory) NewCmdExec(cmdIn io.Reader, cmdOut, cmdErr io.Writer) *cobra.Command {
+func NewCmdExec(f *cmdutil.Factory, cmdIn io.Reader, cmdOut, cmdErr io.Writer) *cobra.Command {
+	params := &execParams{}
 	cmd := &cobra.Command{
 		Use:     "exec -p POD -c CONTAINER -- COMMAND [args...]",
 		Short:   "Execute a command in a container.",
 		Long:    "Execute a command in a container.",
 		Example: exec_example,
 		Run: func(cmd *cobra.Command, args []string) {
-			err := RunExec(f, cmdIn, cmdOut, cmdErr, cmd, args)
-			util.CheckErr(err)
+			err := RunExec(f, cmd, cmdIn, cmdOut, cmdErr, params, args, &defaultRemoteExecutor{})
+			cmdutil.CheckErr(err)
 		},
 	}
-	cmd.Flags().StringP("pod", "p", "", "Pod name")
+	cmd.Flags().StringVarP(&params.podName, "pod", "p", "", "Pod name")
+	cmd.MarkFlagRequired("pod")
 	// TODO support UID
-	cmd.Flags().StringP("container", "c", "", "Container name")
-	cmd.Flags().BoolP("stdin", "i", false, "Pass stdin to the container")
-	cmd.Flags().BoolP("tty", "t", false, "Stdin is a TTY")
+	cmd.Flags().StringVarP(&params.containerName, "container", "c", "", "Container name")
+	cmd.MarkFlagRequired("container")
+	cmd.Flags().BoolVarP(&params.stdin, "stdin", "i", false, "Pass stdin to the container")
+	cmd.Flags().BoolVarP(&params.tty, "tty", "t", false, "Stdin is a TTY")
 	return cmd
 }
 
-func RunExec(f *Factory, cmdIn io.Reader, cmdOut, cmdErr io.Writer, cmd *cobra.Command, args []string) error {
-	podName := util.GetFlagString(cmd, "pod")
-	if len(podName) == 0 {
-		return util.UsageError(cmd, "POD is required for exec")
+type remoteExecutor interface {
+	Execute(req *client.Request, config *client.Config, command []string, stdin io.Reader, stdout, stderr io.Writer, tty bool) error
+}
+
+type defaultRemoteExecutor struct{}
+
+func (*defaultRemoteExecutor) Execute(req *client.Request, config *client.Config, command []string, stdin io.Reader, stdout, stderr io.Writer, tty bool) error {
+	executor := remotecommand.New(req, config, command, stdin, stdout, stderr, tty)
+	return executor.Execute()
+}
+
+type execParams struct {
+	podName       string
+	containerName string
+	stdin         bool
+	tty           bool
+}
+
+func RunExec(f *cmdutil.Factory, cmd *cobra.Command, cmdIn io.Reader, cmdOut, cmdErr io.Writer, p *execParams, args []string, re remoteExecutor) error {
+	if len(p.podName) == 0 {
+		return cmdutil.UsageError(cmd, "POD is required for exec")
 	}
 
 	if len(args) < 1 {
-		return util.UsageError(cmd, "COMMAND is required for exec")
+		return cmdutil.UsageError(cmd, "COMMAND is required for exec")
 	}
-
 	namespace, err := f.DefaultNamespace()
 	if err != nil {
 		return err
@@ -77,7 +97,7 @@ func RunExec(f *Factory, cmdIn io.Reader, cmdOut, cmdErr io.Writer, cmd *cobra.C
 		return err
 	}
 
-	pod, err := client.Pods(namespace).Get(podName)
+	pod, err := client.Pods(namespace).Get(p.podName)
 	if err != nil {
 		return err
 	}
@@ -86,14 +106,14 @@ func RunExec(f *Factory, cmdIn io.Reader, cmdOut, cmdErr io.Writer, cmd *cobra.C
 		glog.Fatalf("Unable to execute command because pod is not running. Current status=%v", pod.Status.Phase)
 	}
 
-	containerName := util.GetFlagString(cmd, "container")
+	containerName := p.containerName
 	if len(containerName) == 0 {
 		containerName = pod.Spec.Containers[0].Name
 	}
 
 	var stdin io.Reader
-	tty := util.GetFlagBool(cmd, "tty")
-	if util.GetFlagBool(cmd, "stdin") {
+	tty := p.tty
+	if p.stdin {
 		stdin = cmdIn
 		if tty {
 			if file, ok := cmdIn.(*os.File); ok {
@@ -133,11 +153,11 @@ func RunExec(f *Factory, cmdIn io.Reader, cmdOut, cmdErr io.Writer, cmd *cobra.C
 	}
 
 	req := client.RESTClient.Get().
-		Prefix("proxy").
-		Resource("minions").
-		Name(pod.Status.Host).
-		Suffix("exec", namespace, podName, containerName)
+		Resource("pods").
+		Name(pod.Name).
+		Namespace(namespace).
+		SubResource("exec").
+		Param("container", containerName)
 
-	e := remotecommand.New(req, config, args, stdin, cmdOut, cmdErr, tty)
-	return e.Execute()
+	return re.Execute(req, config, args, stdin, cmdOut, cmdErr, tty)
 }

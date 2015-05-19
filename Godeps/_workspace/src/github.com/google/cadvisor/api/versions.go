@@ -17,10 +17,10 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"path"
 	"strconv"
 
 	"github.com/golang/glog"
-	"github.com/google/cadvisor/events"
 	info "github.com/google/cadvisor/info/v1"
 	"github.com/google/cadvisor/info/v2"
 	"github.com/google/cadvisor/manager"
@@ -38,6 +38,7 @@ const (
 	storageApi       = "storage"
 	attributesApi    = "attributes"
 	versionApi       = "version"
+	psApi            = "ps"
 )
 
 // Interface for a cAdvisor API version
@@ -58,7 +59,7 @@ func getApiVersions() []ApiVersion {
 	v1_1 := newVersion1_1(v1_0)
 	v1_2 := newVersion1_2(v1_1)
 	v1_3 := newVersion1_3(v1_2)
-	v2_0 := newVersion2_0(v1_3)
+	v2_0 := newVersion2_0()
 
 	return []ApiVersion{v1_0, v1_1, v1_2, v1_3, v2_0}
 
@@ -80,7 +81,7 @@ func (self *version1_0) SupportedRequestTypes() []string {
 func (self *version1_0) HandleRequest(requestType string, request []string, m manager.Manager, w http.ResponseWriter, r *http.Request) error {
 	switch requestType {
 	case machineApi:
-		glog.V(2).Infof("Api - Machine")
+		glog.V(4).Infof("Api - Machine")
 
 		// Get the MachineInfo
 		machineInfo, err := m.GetMachineInfo()
@@ -94,7 +95,7 @@ func (self *version1_0) HandleRequest(requestType string, request []string, m ma
 		}
 	case containersApi:
 		containerName := getContainerName(request)
-		glog.V(2).Infof("Api - Container(%s)", containerName)
+		glog.V(4).Infof("Api - Container(%s)", containerName)
 
 		// Get the query request.
 		query, err := getContainerInfoRequest(r.Body)
@@ -144,7 +145,7 @@ func (self *version1_1) HandleRequest(requestType string, request []string, m ma
 	switch requestType {
 	case subcontainersApi:
 		containerName := getContainerName(request)
-		glog.V(2).Infof("Api - Subcontainers(%s)", containerName)
+		glog.V(4).Infof("Api - Subcontainers(%s)", containerName)
 
 		// Get the query request.
 		query, err := getContainerInfoRequest(r.Body)
@@ -193,7 +194,7 @@ func (self *version1_2) SupportedRequestTypes() []string {
 func (self *version1_2) HandleRequest(requestType string, request []string, m manager.Manager, w http.ResponseWriter, r *http.Request) error {
 	switch requestType {
 	case dockerApi:
-		glog.V(2).Infof("Api - Docker(%v)", request)
+		glog.V(4).Infof("Api - Docker(%v)", request)
 
 		// Get the query request.
 		query, err := getContainerInfoRequest(r.Body)
@@ -262,40 +263,41 @@ func (self *version1_3) SupportedRequestTypes() []string {
 func (self *version1_3) HandleRequest(requestType string, request []string, m manager.Manager, w http.ResponseWriter, r *http.Request) error {
 	switch requestType {
 	case eventsApi:
-		query, eventsFromAllTime, err := getEventRequest(r)
-		if err != nil {
-			return err
-		}
-		glog.V(2).Infof("Api - Events(%v)", query)
-		if eventsFromAllTime {
-			pastEvents, err := m.GetPastEvents(query)
-			if err != nil {
-				return err
-			}
-			return writeResult(pastEvents, w)
-		}
-		eventsChannel := make(chan *events.Event, 10)
-		err = m.WatchForEvents(query, eventsChannel)
-		if err != nil {
-			return err
-		}
-		return streamResults(eventsChannel, w, r)
+		return handleEventRequest(request, m, w, r)
 	default:
 		return self.baseVersion.HandleRequest(requestType, request, m, w, r)
 	}
 }
 
-// API v2.0
+func handleEventRequest(request []string, m manager.Manager, w http.ResponseWriter, r *http.Request) error {
+	query, stream, err := getEventRequest(r)
+	if err != nil {
+		return err
+	}
+	query.ContainerName = path.Join("/", getContainerName(request))
+	glog.V(4).Infof("Api - Events(%v)", query)
+	if !stream {
+		pastEvents, err := m.GetPastEvents(query)
+		if err != nil {
+			return err
+		}
+		return writeResult(pastEvents, w)
+	}
+	eventChannel, err := m.WatchForEvents(query)
+	if err != nil {
+		return err
+	}
+	return streamResults(eventChannel, w, r, m)
 
-// v2.0 builds on v1.3
-type version2_0 struct {
-	baseVersion *version1_3
 }
 
-func newVersion2_0(v *version1_3) *version2_0 {
-	return &version2_0{
-		baseVersion: v,
-	}
+// API v2.0
+
+type version2_0 struct {
+}
+
+func newVersion2_0() *version2_0 {
+	return &version2_0{}
 }
 
 func (self *version2_0) Version() string {
@@ -303,7 +305,7 @@ func (self *version2_0) Version() string {
 }
 
 func (self *version2_0) SupportedRequestTypes() []string {
-	return append(self.baseVersion.SupportedRequestTypes(), summaryApi)
+	return []string{versionApi, attributesApi, eventsApi, machineApi, summaryApi, statsApi, specApi, storageApi, psApi}
 }
 
 func (self *version2_0) HandleRequest(requestType string, request []string, m manager.Manager, w http.ResponseWriter, r *http.Request) error {
@@ -313,14 +315,14 @@ func (self *version2_0) HandleRequest(requestType string, request []string, m ma
 	}
 	switch requestType {
 	case versionApi:
-		glog.V(2).Infof("Api - Version")
+		glog.V(4).Infof("Api - Version")
 		versionInfo, err := m.GetVersionInfo()
 		if err != nil {
 			return err
 		}
 		return writeResult(versionInfo.CadvisorVersion, w)
 	case attributesApi:
-		glog.V(2).Info("Api - Attributes")
+		glog.V(4).Info("Api - Attributes")
 
 		machineInfo, err := m.GetMachineInfo()
 		if err != nil {
@@ -333,7 +335,7 @@ func (self *version2_0) HandleRequest(requestType string, request []string, m ma
 		info := v2.GetAttributes(machineInfo, versionInfo)
 		return writeResult(info, w)
 	case machineApi:
-		glog.V(2).Info("Api - Machine")
+		glog.V(4).Info("Api - Machine")
 
 		// TODO(rjnagal): Move machineInfo from v1.
 		machineInfo, err := m.GetMachineInfo()
@@ -343,7 +345,7 @@ func (self *version2_0) HandleRequest(requestType string, request []string, m ma
 		return writeResult(machineInfo, w)
 	case summaryApi:
 		containerName := getContainerName(request)
-		glog.V(2).Infof("Api - Summary for container %q, options %+v", containerName, opt)
+		glog.V(4).Infof("Api - Summary for container %q, options %+v", containerName, opt)
 
 		stats, err := m.GetDerivedStats(containerName, opt)
 		if err != nil {
@@ -352,7 +354,7 @@ func (self *version2_0) HandleRequest(requestType string, request []string, m ma
 		return writeResult(stats, w)
 	case statsApi:
 		name := getContainerName(request)
-		glog.V(2).Infof("Api - Stats: Looking for stats for container %q, options %+v", name, opt)
+		glog.V(4).Infof("Api - Stats: Looking for stats for container %q, options %+v", name, opt)
 		conts, err := m.GetRequestedContainersInfo(name, opt)
 		if err != nil {
 			return err
@@ -364,7 +366,7 @@ func (self *version2_0) HandleRequest(requestType string, request []string, m ma
 		return writeResult(contStats, w)
 	case specApi:
 		containerName := getContainerName(request)
-		glog.V(2).Infof("Api - Spec for container %q, options %+v", containerName, opt)
+		glog.V(4).Infof("Api - Spec for container %q, options %+v", containerName, opt)
 		specs, err := m.GetContainerSpec(containerName, opt)
 		if err != nil {
 			return err
@@ -388,8 +390,21 @@ func (self *version2_0) HandleRequest(requestType string, request []string, m ma
 			}
 		}
 		return writeResult(fi, w)
+	case eventsApi:
+		return handleEventRequest(request, m, w, r)
+	case psApi:
+		// reuse container type from request.
+		// ignore recursive.
+		// TODO(rjnagal): consider count to limit ps output.
+		name := getContainerName(request)
+		glog.V(4).Infof("Api - Spec for container %q, options %+v", name, opt)
+		ps, err := m.GetProcessList(name, opt)
+		if err != nil {
+			return fmt.Errorf("process listing failed: %v", err)
+		}
+		return writeResult(ps, w)
 	default:
-		return self.baseVersion.HandleRequest(requestType, request, m, w, r)
+		return fmt.Errorf("unknown request type %q", requestType)
 	}
 }
 

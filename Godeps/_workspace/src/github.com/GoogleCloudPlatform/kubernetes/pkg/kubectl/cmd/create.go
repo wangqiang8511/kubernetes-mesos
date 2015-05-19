@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl"
 	cmdutil "github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/cmd/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/resource"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
@@ -38,7 +39,7 @@ $ kubectl create -f pod.json
 $ cat pod.json | kubectl create -f -`
 )
 
-func (f *Factory) NewCmdCreate(out io.Writer) *cobra.Command {
+func NewCmdCreate(f *cmdutil.Factory, out io.Writer) *cobra.Command {
 	var filenames util.StringList
 	cmd := &cobra.Command{
 		Use:     "create -f FILENAME",
@@ -47,10 +48,14 @@ func (f *Factory) NewCmdCreate(out io.Writer) *cobra.Command {
 		Example: create_example,
 		Run: func(cmd *cobra.Command, args []string) {
 			cmdutil.CheckErr(ValidateArgs(cmd, args))
-			cmdutil.CheckErr(RunCreate(f, out, cmd, filenames))
+			cmdutil.CheckErr(RunCreate(f, out, filenames))
 		},
 	}
-	cmd.Flags().VarP(&filenames, "filename", "f", "Filename, directory, or URL to file to use to create the resource")
+
+	usage := "Filename, directory, or URL to file to use to create the resource"
+	kubectl.AddJsonFilenameFlag(cmd, &filenames, usage)
+	cmd.MarkFlagRequired("filename")
+
 	return cmd
 }
 
@@ -61,7 +66,7 @@ func ValidateArgs(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func RunCreate(f *Factory, out io.Writer, cmd *cobra.Command, filenames util.StringList) error {
+func RunCreate(f *cmdutil.Factory, out io.Writer, filenames util.StringList) error {
 	schema, err := f.Validator()
 	if err != nil {
 		return err
@@ -74,6 +79,7 @@ func RunCreate(f *Factory, out io.Writer, cmd *cobra.Command, filenames util.Str
 
 	mapper, typer := f.Object()
 	r := resource.NewBuilder(mapper, typer, f.ClientMapperForCommand()).
+		Schema(schema).
 		ContinueOnError().
 		NamespaceParam(cmdNamespace).RequireNamespace().
 		FilenameParam(filenames...).
@@ -88,9 +94,6 @@ func RunCreate(f *Factory, out io.Writer, cmd *cobra.Command, filenames util.Str
 	err = r.Visit(func(info *resource.Info) error {
 		data, err := info.Mapping.Codec.Encode(info.Object)
 		if err != nil {
-			return err
-		}
-		if err := schema.ValidateBytes(data); err != nil {
 			return err
 		}
 		obj, err := resource.NewHelper(info.Client, info.Mapping).Create(info.Namespace, true, data)

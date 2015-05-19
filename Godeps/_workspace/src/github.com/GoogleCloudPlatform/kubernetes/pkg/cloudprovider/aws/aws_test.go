@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ limitations under the License.
 package aws_cloud
 
 import (
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -29,27 +30,68 @@ import (
 )
 
 func TestReadAWSCloudConfig(t *testing.T) {
-	_, err1 := readAWSCloudConfig(nil)
-	if err1 == nil {
-		t.Errorf("Should error when no config reader is given")
+	tests := []struct {
+		name string
+
+		reader   io.Reader
+		metadata AWSMetadata
+
+		expectError bool
+		zone        string
+	}{
+		{
+			"No config reader",
+			nil, nil,
+			true, "",
+		},
+		{
+			"Empty config, no metadata",
+			strings.NewReader(""), nil,
+			true, "",
+		},
+		{
+			"No zone in config, no metadata",
+			strings.NewReader("[global]\n"), nil,
+			true, "",
+		},
+		{
+			"Zone in config, no metadata",
+			strings.NewReader("[global]\nzone = eu-west-1a"), nil,
+			false, "eu-west-1a",
+		},
+		{
+			"No zone in config, metadata does not have zone",
+			strings.NewReader("[global]\n"), &FakeMetadata{},
+			true, "",
+		},
+		{
+			"No zone in config, metadata has zone",
+			strings.NewReader("[global]\n"), &FakeMetadata{availabilityZone: "eu-west-1a"},
+			false, "eu-west-1a",
+		},
+		{
+			"Zone in config should take precedence over metadata",
+			strings.NewReader("[global]\nzone = us-east-1a"), &FakeMetadata{availabilityZone: "eu-west-1a"},
+			false, "us-east-1a",
+		},
 	}
 
-	_, err2 := readAWSCloudConfig(strings.NewReader(""))
-	if err2 == nil {
-		t.Errorf("Should error when config is empty")
-	}
-
-	_, err3 := readAWSCloudConfig(strings.NewReader("[global]\n"))
-	if err3 == nil {
-		t.Errorf("Should error when no region is specified")
-	}
-
-	cfg, err4 := readAWSCloudConfig(strings.NewReader("[global]\nregion = eu-west-1"))
-	if err4 != nil {
-		t.Errorf("Should succeed when a region is specified: %s", err4)
-	}
-	if cfg.Global.Region != "eu-west-1" {
-		t.Errorf("Should read region from config")
+	for _, test := range tests {
+		t.Logf("Running test case %s", test.name)
+		cfg, err := readAWSCloudConfig(test.reader, test.metadata)
+		if test.expectError {
+			if err == nil {
+				t.Errorf("Should error for case %s", test.name)
+			}
+		} else {
+			if err != nil {
+				t.Errorf("Should succeed for case: %s", test.name)
+			}
+			if cfg.Global.Zone != test.zone {
+				t.Errorf("Incorrect zone value (%s vs %s) for case: %s",
+					cfg.Global.Zone, test.zone, test.name)
+			}
+		}
 	}
 }
 
@@ -58,68 +100,147 @@ func TestNewAWSCloud(t *testing.T) {
 		return aws.Auth{"", "", ""}, nil
 	}
 
-	_, err1 := newAWSCloud(nil, fakeAuthFunc)
-	if err1 == nil {
-		t.Errorf("Should error when no config reader is given")
+	tests := []struct {
+		name string
+
+		reader   io.Reader
+		authFunc AuthFunc
+		metadata AWSMetadata
+
+		expectError bool
+		zone        string
+	}{
+		{
+			"No config reader",
+			nil, fakeAuthFunc, &FakeMetadata{},
+			true, "",
+		},
+		{
+			"Config specified invalid zone",
+			strings.NewReader("[global]\nzone = blahonga"), fakeAuthFunc, &FakeMetadata{},
+			true, "",
+		},
+		{
+			"Config specifies valid zone",
+			strings.NewReader("[global]\nzone = eu-west-1a"), fakeAuthFunc, &FakeMetadata{},
+			false, "eu-west-1a",
+		},
+		{
+			"Gets zone from metadata when not in config",
+
+			strings.NewReader("[global]\n"),
+			fakeAuthFunc,
+			&FakeMetadata{availabilityZone: "us-east-1a"},
+
+			false, "us-east-1a",
+		},
+		{
+			"No zone in config or metadata",
+			strings.NewReader("[global]\n"), fakeAuthFunc, &FakeMetadata{},
+			true, "",
+		},
 	}
 
-	_, err2 := newAWSCloud(strings.NewReader(
-		"[global]\nregion = blahonga"),
-		fakeAuthFunc)
-	if err2 == nil {
-		t.Errorf("Should error when config specifies invalid region")
-	}
-
-	_, err3 := newAWSCloud(
-		strings.NewReader("[global]\nregion = eu-west-1"),
-		fakeAuthFunc)
-	if err3 != nil {
-		t.Errorf("Should succeed when a valid region is specified: %s", err3)
+	for _, test := range tests {
+		t.Logf("Running test case %s", test.name)
+		c, err := newAWSCloud(test.reader, test.authFunc, test.metadata)
+		if test.expectError {
+			if err == nil {
+				t.Errorf("Should error for case %s", test.name)
+			}
+		} else {
+			if err != nil {
+				t.Errorf("Should succeed for case: %s", test.name)
+			}
+			if c.availabilityZone != test.zone {
+				t.Errorf("Incorrect zone value (%s vs %s) for case: %s",
+					c.availabilityZone, test.zone, test.name)
+			}
+		}
 	}
 }
 
 type FakeEC2 struct {
-	instances        []ec2.Instance
-	availabilityZone string
+	instances []ec2.Instance
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if needle == s {
+			return true
+		}
+	}
+	return false
 }
 
 func (self *FakeEC2) Instances(instanceIds []string, filter *ec2InstanceFilter) (resp *ec2.InstancesResp, err error) {
 	matches := []ec2.Instance{}
 	for _, instance := range self.instances {
-		if filter == nil || filter.Matches(instance) {
-			matches = append(matches, instance)
+		if filter != nil && !filter.Matches(instance) {
+			continue
 		}
+		if instanceIds != nil && !contains(instanceIds, instance.InstanceId) {
+			continue
+		}
+		matches = append(matches, instance)
 	}
 	return &ec2.InstancesResp{"",
 		[]ec2.Reservation{
 			{"", "", "", nil, matches}}}, nil
 }
 
-func (self *FakeEC2) GetMetaData(key string) ([]byte, error) {
+type FakeMetadata struct {
+	availabilityZone string
+	instanceId       string
+}
+
+func (self *FakeMetadata) GetMetaData(key string) ([]byte, error) {
 	if key == "placement/availability-zone" {
 		return []byte(self.availabilityZone), nil
+	} else if key == "instance-id" {
+		return []byte(self.instanceId), nil
 	} else {
 		return nil, nil
 	}
+}
+
+func (ec2 *FakeEC2) AttachVolume(volumeID string, instanceId string, mountDevice string) (resp *ec2.AttachVolumeResp, err error) {
+	panic("Not implemented")
+}
+
+func (ec2 *FakeEC2) DetachVolume(volumeID string) (resp *ec2.SimpleResp, err error) {
+	panic("Not implemented")
+}
+
+func (ec2 *FakeEC2) Volumes(volumeIDs []string, filter *ec2.Filter) (resp *ec2.VolumesResp, err error) {
+	panic("Not implemented")
+}
+
+func (ec2 *FakeEC2) CreateVolume(request *ec2.CreateVolume) (resp *ec2.CreateVolumeResp, err error) {
+	panic("Not implemented")
+}
+
+func (ec2 *FakeEC2) DeleteVolume(volumeID string) (resp *ec2.SimpleResp, err error) {
+	panic("Not implemented")
 }
 
 func mockInstancesResp(instances []ec2.Instance) (aws *AWSCloud) {
 	availabilityZone := "us-west-2d"
 	return &AWSCloud{
 		ec2: &FakeEC2{
-			instances:        instances,
-			availabilityZone: availabilityZone,
+			instances: instances,
 		},
+		availabilityZone: availabilityZone,
 	}
 }
 
 func mockAvailabilityZone(region string, availabilityZone string) *AWSCloud {
 	return &AWSCloud{
-		ec2: &FakeEC2{
-			availabilityZone: availabilityZone,
-		},
-		region: aws.Regions[region],
+		ec2:              &FakeEC2{},
+		availabilityZone: availabilityZone,
+		region:           aws.Regions[region],
 	}
+
 }
 
 func TestList(t *testing.T) {
@@ -159,12 +280,22 @@ func TestList(t *testing.T) {
 	}
 }
 
+func testHasNodeAddress(t *testing.T, addrs []api.NodeAddress, addressType api.NodeAddressType, address string) {
+	for _, addr := range addrs {
+		if addr.Type == addressType && addr.Address == address {
+			return
+		}
+	}
+	t.Errorf("Did not find expected address: %s:%s in %v", addressType, address, addrs)
+}
+
 func TestNodeAddresses(t *testing.T) {
 	// Note these instances have the same name
 	// (we test that this produces an error)
 	instances := make([]ec2.Instance, 2)
 	instances[0].PrivateDNSName = "instance1"
 	instances[0].PrivateIpAddress = "192.168.0.1"
+	instances[0].PublicIpAddress = "1.2.3.4"
 	instances[0].State.Name = "running"
 	instances[1].PrivateDNSName = "instance1"
 	instances[1].PrivateIpAddress = "192.168.0.2"
@@ -187,12 +318,12 @@ func TestNodeAddresses(t *testing.T) {
 	if err3 != nil {
 		t.Errorf("Should not error when instance found")
 	}
-	if len(addrs3) != 1 {
-		t.Errorf("Should return exactly one NodeAddress")
+	if len(addrs3) != 3 {
+		t.Errorf("Should return exactly 3 NodeAddresses")
 	}
-	if e, a := instances[0].PrivateIpAddress, addrs3[0].Address; e != a {
-		t.Errorf("Expected %v, got %v", e, a)
-	}
+	testHasNodeAddress(t, addrs3, api.NodeInternalIP, "192.168.0.1")
+	testHasNodeAddress(t, addrs3, api.NodeLegacyHostIP, "192.168.0.1")
+	testHasNodeAddress(t, addrs3, api.NodeExternalIP, "1.2.3.4")
 }
 
 func TestGetRegion(t *testing.T) {

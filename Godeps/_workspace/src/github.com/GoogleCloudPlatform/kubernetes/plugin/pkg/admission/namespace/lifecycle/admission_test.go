@@ -1,5 +1,5 @@
 /*
-Copyright 2015 Google Inc. All rights reserved.
+Copyright 2015 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,8 +21,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/admission"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/cache"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/testclient"
 )
 
 // TestAdmission
@@ -38,7 +38,7 @@ func TestAdmission(t *testing.T) {
 	}
 	store := cache.NewStore(cache.MetaNamespaceIndexFunc)
 	store.Add(namespaceObj)
-	mockClient := &client.Fake{}
+	mockClient := &testclient.Fake{}
 	handler := &lifecycle{
 		client: mockClient,
 		store:  store,
@@ -50,7 +50,7 @@ func TestAdmission(t *testing.T) {
 			Containers: []api.Container{{Name: "ctr", Image: "image"}},
 		},
 	}
-	err := handler.Admit(admission.NewAttributesRecord(&pod, namespaceObj.Namespace, "pods", "CREATE"))
+	err := handler.Admit(admission.NewAttributesRecord(&pod, "Pod", namespaceObj.Namespace, "pods", "CREATE", nil))
 	if err != nil {
 		t.Errorf("Unexpected error returned from admission handler: %v", err)
 	}
@@ -60,19 +60,19 @@ func TestAdmission(t *testing.T) {
 	store.Add(namespaceObj)
 
 	// verify create operations in the namespace cause an error
-	err = handler.Admit(admission.NewAttributesRecord(&pod, namespaceObj.Namespace, "pods", "CREATE"))
+	err = handler.Admit(admission.NewAttributesRecord(&pod, "Pod", namespaceObj.Namespace, "pods", "CREATE", nil))
 	if err == nil {
 		t.Errorf("Expected error rejecting creates in a namespace when it is terminating")
 	}
 
 	// verify update operations in the namespace can proceed
-	err = handler.Admit(admission.NewAttributesRecord(&pod, namespaceObj.Namespace, "pods", "UPDATE"))
+	err = handler.Admit(admission.NewAttributesRecord(&pod, "Pod", namespaceObj.Namespace, "pods", "UPDATE", nil))
 	if err != nil {
 		t.Errorf("Unexpected error returned from admission handler: %v", err)
 	}
 
 	// verify delete operations in the namespace can proceed
-	err = handler.Admit(admission.NewAttributesRecord(nil, namespaceObj.Namespace, "pods", "DELETE"))
+	err = handler.Admit(admission.NewAttributesRecord(nil, "Pod", namespaceObj.Namespace, "pods", "DELETE", nil))
 	if err != nil {
 		t.Errorf("Unexpected error returned from admission handler: %v", err)
 	}

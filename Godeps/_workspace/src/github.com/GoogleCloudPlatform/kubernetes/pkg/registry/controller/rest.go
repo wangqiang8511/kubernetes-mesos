@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package controller
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/validation"
@@ -26,7 +27,6 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/generic"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/fielderrors"
-	"strconv"
 )
 
 // rcStrategy implements verification logic for Replication Controllers.
@@ -58,7 +58,7 @@ func (rcStrategy) PrepareForUpdate(obj, old runtime.Object) {
 }
 
 // Validate validates a new replication controller.
-func (rcStrategy) Validate(obj runtime.Object) fielderrors.ValidationErrorList {
+func (rcStrategy) Validate(ctx api.Context, obj runtime.Object) fielderrors.ValidationErrorList {
 	controller := obj.(*api.ReplicationController)
 	return validation.ValidateReplicationController(controller)
 }
@@ -70,14 +70,16 @@ func (rcStrategy) AllowCreateOnUpdate() bool {
 }
 
 // ValidateUpdate is the default update validation for an end user.
-func (rcStrategy) ValidateUpdate(obj, old runtime.Object) fielderrors.ValidationErrorList {
-	return validation.ValidateReplicationControllerUpdate(old.(*api.ReplicationController), obj.(*api.ReplicationController))
+func (rcStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
+	validationErrorList := validation.ValidateReplicationController(obj.(*api.ReplicationController))
+	updateErrorList := validation.ValidateReplicationControllerUpdate(old.(*api.ReplicationController), obj.(*api.ReplicationController))
+	return append(validationErrorList, updateErrorList...)
 }
 
 // ControllerToSelectableFields returns a label set that represents the object.
-func ControllerToSelectableFields(controller *api.ReplicationController) labels.Set {
-	return labels.Set{
-		"name":            controller.Name,
+func ControllerToSelectableFields(controller *api.ReplicationController) fields.Set {
+	return fields.Set{
+		"metadata.name":   controller.Name,
 		"status.replicas": strconv.Itoa(controller.Status.Replicas),
 	}
 }
@@ -86,13 +88,15 @@ func ControllerToSelectableFields(controller *api.ReplicationController) labels.
 // watch events from etcd to clients of the apiserver only interested in specific
 // labels/fields.
 func MatchController(label labels.Selector, field fields.Selector) generic.Matcher {
-	return generic.MatcherFunc(
-		func(obj runtime.Object) (bool, error) {
-			controllerObj, ok := obj.(*api.ReplicationController)
+	return &generic.SelectionPredicate{
+		Label: label,
+		Field: field,
+		GetAttrs: func(obj runtime.Object) (labels.Set, fields.Set, error) {
+			rc, ok := obj.(*api.ReplicationController)
 			if !ok {
-				return false, fmt.Errorf("Given object is not a replication controller.")
+				return nil, nil, fmt.Errorf("Given object is not a replication controller.")
 			}
-			fields := ControllerToSelectableFields(controllerObj)
-			return label.Matches(labels.Set(controllerObj.Labels)) && field.Matches(fields), nil
-		})
+			return labels.Set(rc.ObjectMeta.Labels), ControllerToSelectableFields(rc), nil
+		},
+	}
 }

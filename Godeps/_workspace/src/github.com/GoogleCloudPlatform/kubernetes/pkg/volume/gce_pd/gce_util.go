@@ -1,5 +1,5 @@
 /*
-Copyright 2014 Google Inc. All rights reserved.
+Copyright 2014 The Kubernetes Authors All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -39,26 +39,37 @@ func (util *GCEDiskUtil) AttachAndMountDisk(pd *gcePersistentDisk, globalPDPath 
 	if err != nil {
 		return err
 	}
-	flags := uintptr(0)
-	if pd.readOnly {
-		flags = mount.FlagReadOnly
-	}
 	if err := gce.(*gce_cloud.GCECloud).AttachDisk(pd.pdName, pd.readOnly); err != nil {
 		return err
 	}
-	devicePath := path.Join("/dev/disk/by-id/", "google-"+pd.pdName)
+
+	devicePaths := []string{
+		path.Join("/dev/disk/by-id/", "google-"+pd.pdName),
+		path.Join("/dev/disk/by-id/", "scsi-0Google_PersistentDisk_"+pd.pdName),
+	}
+
 	if pd.partition != "" {
-		devicePath = devicePath + "-part" + pd.partition
+		for i, path := range devicePaths {
+			devicePaths[i] = path + "-part" + pd.partition
+		}
 	}
 	//TODO(jonesdl) There should probably be better method than busy-waiting here.
 	numTries := 0
+	devicePath := ""
+	// Wait for the disk device to be created
 	for {
-		_, err := os.Stat(devicePath)
-		if err == nil {
-			break
+		for _, path := range devicePaths {
+			_, err := os.Stat(path)
+			if err == nil {
+				devicePath = path
+				break
+			}
+			if err != nil && !os.IsNotExist(err) {
+				return err
+			}
 		}
-		if err != nil && !os.IsNotExist(err) {
-			return err
+		if devicePath != "" {
+			break
 		}
 		numTries++
 		if numTries == 10 {
@@ -68,7 +79,7 @@ func (util *GCEDiskUtil) AttachAndMountDisk(pd *gcePersistentDisk, globalPDPath 
 	}
 
 	// Only mount the PD globally once.
-	mountpoint, err := mount.IsMountPoint(globalPDPath)
+	mountpoint, err := pd.mounter.IsMountPoint(globalPDPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			if err := os.MkdirAll(globalPDPath, 0750); err != nil {
@@ -79,8 +90,12 @@ func (util *GCEDiskUtil) AttachAndMountDisk(pd *gcePersistentDisk, globalPDPath 
 			return err
 		}
 	}
+	options := []string{}
+	if pd.readOnly {
+		options = append(options, "ro")
+	}
 	if !mountpoint {
-		err = pd.diskMounter.Mount(devicePath, globalPDPath, pd.fsType, flags, "")
+		err = pd.diskMounter.Mount(devicePath, globalPDPath, pd.fsType, options)
 		if err != nil {
 			os.Remove(globalPDPath)
 			return err
@@ -93,7 +108,7 @@ func (util *GCEDiskUtil) AttachAndMountDisk(pd *gcePersistentDisk, globalPDPath 
 func (util *GCEDiskUtil) DetachDisk(pd *gcePersistentDisk) error {
 	// Unmount the global PD mount, which should be the only one.
 	globalPDPath := makeGlobalPDName(pd.plugin.host, pd.pdName)
-	if err := pd.mounter.Unmount(globalPDPath, 0); err != nil {
+	if err := pd.mounter.Unmount(globalPDPath); err != nil {
 		return err
 	}
 	if err := os.Remove(globalPDPath); err != nil {
@@ -120,18 +135,20 @@ type gceSafeFormatAndMount struct {
 }
 
 // uses /usr/share/google/safe_format_and_mount to optionally mount, and format a disk
-func (mounter *gceSafeFormatAndMount) Mount(source string, target string, fstype string, flags uintptr, data string) error {
+func (mounter *gceSafeFormatAndMount) Mount(source string, target string, fstype string, options []string) error {
 	// Don't attempt to format if mounting as readonly. Go straight to mounting.
-	if (flags & mount.FlagReadOnly) != 0 {
-		return mounter.Interface.Mount(source, target, fstype, flags, data)
+	for _, option := range options {
+		if option == "ro" {
+			return mounter.Interface.Mount(source, target, fstype, options)
+		}
 	}
 	args := []string{}
 	// ext4 is the default for safe_format_and_mount
 	if len(fstype) > 0 && fstype != "ext4" {
 		args = append(args, "-m", fmt.Sprintf("mkfs.%s", fstype))
 	}
+	args = append(args, options...)
 	args = append(args, source, target)
-	// TODO: Accept other options here?
 	glog.V(5).Infof("exec-ing: /usr/share/google/safe_format_and_mount %v", args)
 	cmd := mounter.runner.Command("/usr/share/google/safe_format_and_mount", args...)
 	dataOut, err := cmd.CombinedOutput()

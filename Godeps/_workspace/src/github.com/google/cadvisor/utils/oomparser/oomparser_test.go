@@ -17,13 +17,14 @@ package oomparser
 import (
 	"bufio"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 )
 
 const startLine = "Jan 21 22:01:49 localhost kernel: [62278.816267] ruby invoked oom-killer: gfp_mask=0x201da, order=0, oom_score_adj=0"
 const endLine = "Jan 21 22:01:49 localhost kernel: [62279.421192] Killed process 19667 (evilprogram2) total-vm:1460016kB, anon-rss:1414008kB, file-rss:4kB"
-const containerLine = "Jan 26 14:10:07 kateknister0.mtv.corp.google.com kernel: [1814368.465205] Task in /mem2 killed as a result of limit of /mem2"
+const containerLine = "Jan 26 14:10:07 kateknister0.mtv.corp.google.com kernel: [1814368.465205] Task in /mem2 killed as a result of limit of /mem3"
 const containerLogFile = "containerOomExampleLog.txt"
 const systemLogFile = "systemOomExampleLog.txt"
 
@@ -35,10 +36,11 @@ func createExpectedContainerOomInstance(t *testing.T) *OomInstance {
 		return nil
 	}
 	return &OomInstance{
-		Pid:           13536,
-		ProcessName:   "memorymonster",
-		TimeOfDeath:   deathTime,
-		ContainerName: "/mem2",
+		Pid:                 13536,
+		ProcessName:         "memorymonster",
+		TimeOfDeath:         deathTime,
+		ContainerName:       "/mem2",
+		VictimContainerName: "/mem3",
 	}
 }
 
@@ -50,10 +52,11 @@ func createExpectedSystemOomInstance(t *testing.T) *OomInstance {
 		return nil
 	}
 	return &OomInstance{
-		Pid:           1532,
-		ProcessName:   "badsysprogram",
-		TimeOfDeath:   deathTime,
-		ContainerName: "/",
+		Pid:                 1532,
+		ProcessName:         "badsysprogram",
+		TimeOfDeath:         deathTime,
+		ContainerName:       "/",
+		VictimContainerName: "/",
 	}
 }
 
@@ -72,6 +75,9 @@ func TestGetContainerName(t *testing.T) {
 	}
 	if currentOomInstance.ContainerName != "/mem2" {
 		t.Errorf("getContainerName should have set containerName to /mem2, not %s", currentOomInstance.ContainerName)
+	}
+	if currentOomInstance.VictimContainerName != "/mem3" {
+		t.Errorf("getContainerName should have set victimContainerName to /mem3, not %s", currentOomInstance.VictimContainerName)
 	}
 }
 
@@ -116,44 +122,6 @@ func TestCheckIfStartOfMessages(t *testing.T) {
 	}
 }
 
-func TestAnalyzeLinesContainerOom(t *testing.T) {
-	expectedContainerOomInstance := createExpectedContainerOomInstance(t)
-	helpTestAnalyzeLines(expectedContainerOomInstance, containerLogFile, t)
-}
-
-func TestAnalyzeLinesSystemOom(t *testing.T) {
-	expectedSystemOomInstance := createExpectedSystemOomInstance(t)
-	helpTestAnalyzeLines(expectedSystemOomInstance, systemLogFile, t)
-}
-
-func helpTestAnalyzeLines(oomCheckInstance *OomInstance, sysFile string, t *testing.T) {
-	outStream := make(chan *OomInstance)
-	oomLog := new(OomParser)
-	oomLog.systemFile = sysFile
-	file, err := os.Open(oomLog.systemFile)
-	if err != nil {
-		t.Errorf("couldn't open test log: %v", err)
-	}
-	ioreader := bufio.NewReader(file)
-	timeout := make(chan bool, 1)
-	go func() {
-		time.Sleep(1 * time.Second)
-		timeout <- true
-	}()
-	go oomLog.analyzeLines(ioreader, outStream)
-	select {
-	case oomInstance := <-outStream:
-		if *oomCheckInstance != *oomInstance {
-			t.Errorf("wrong instance returned. Expected %v and got %v",
-				oomCheckInstance, oomInstance)
-			t.Errorf("Container of one was %v and the other %v", oomCheckInstance.ContainerName, oomInstance.ContainerName)
-		}
-	case <-timeout:
-		t.Error(
-			"timeout happened before oomInstance was found in test file")
-	}
-}
-
 func TestStreamOomsContainer(t *testing.T) {
 	expectedContainerOomInstance := createExpectedContainerOomInstance(t)
 	helpTestStreamOoms(expectedContainerOomInstance, containerLogFile, t)
@@ -166,22 +134,18 @@ func TestStreamOomsSystem(t *testing.T) {
 
 func helpTestStreamOoms(oomCheckInstance *OomInstance, sysFile string, t *testing.T) {
 	outStream := make(chan *OomInstance)
-	oomLog := new(OomParser)
-	oomLog.systemFile = sysFile
+	oomLog := mockOomParser(sysFile, t)
 	timeout := make(chan bool, 1)
 	go func() {
 		time.Sleep(1 * time.Second)
 		timeout <- true
 	}()
 
-	err := oomLog.StreamOoms(outStream)
-	if err != nil {
-		t.Errorf("had an error opening file: %v", err)
-	}
+	go oomLog.StreamOoms(outStream)
 
 	select {
 	case oomInstance := <-outStream:
-		if *oomCheckInstance != *oomInstance {
+		if reflect.DeepEqual(*oomCheckInstance, *oomInstance) {
 			t.Errorf("wrong instance returned. Expected %v and got %v",
 				oomCheckInstance, oomInstance)
 		}
@@ -191,9 +155,12 @@ func helpTestStreamOoms(oomCheckInstance *OomInstance, sysFile string, t *testin
 	}
 }
 
-func TestNew(t *testing.T) {
-	_, err := New()
+func mockOomParser(sysFile string, t *testing.T) *OomParser {
+	file, err := os.Open(sysFile)
 	if err != nil {
-		t.Errorf("function New() had error %v", err)
+		t.Errorf("had an error opening file: %v", err)
+	}
+	return &OomParser{
+		ioreader: bufio.NewReader(file),
 	}
 }
