@@ -55,7 +55,7 @@ $ make install DESTDIR=$(pwd)/bin  # install to ./bin
 ### Start the framework
 
 **NETWORKING:** Kubernetes v0.5 introduced "Services v2" which follows an IP-per-Service model.
-A consequence of this is that you must provide the Kubernetes-Mesos framework with a [CIDR][8] subnet that will be used for the allocation of IP addresses for Kubernetes services: the `-portal_net` parameter.
+A consequence of this is that you must provide the Kubernetes-Mesos framework with a [CIDR][8] subnet that will be used for the allocation of IP addresses for Kubernetes services: the `-portal-net` parameter.
 Please keep this in mind when reviewing (and attempting) the example below - the CIDR subnet may need to be adjusted for your network.
 See the Kubernetes [release notes][9] for additional details regarding the new services model.
 
@@ -116,24 +116,24 @@ Fire up the kubernetes-mesos framework components (yes, these are **all** requir
 ```shell
 $ ./bin/km apiserver \
   --address=${servicehost} \
-  --etcd_servers=http://${servicehost}:4001 \
-  --portal_net=10.10.10.0/24 \
+  --etcd-servers=http://${servicehost}:4001 \
+  --portal-net=10.10.10.0/24 \
   --port=8888 \
-  --cloud_provider=mesos \
-  --cloud_config=./mesos-cloud.conf \
+  --cloud-provider=mesos \
+  --cloud-config=./mesos-cloud.conf \
   --v=2 >apiserver.log 2>&1 &
 
 $ ./bin/km controller-manager \
   --master=$servicehost:8888 \
-  --cloud_config=./mesos-cloud.conf \
+  --cloud-config=./mesos-cloud.conf \
   --v=2 >controller.log 2>&1 &
 
 $ ./bin/km scheduler \
-  --mesos_master=${mesos_masster} \
+  --mesos-master=${mesos_master} \
   --address=${servicehost} \
-  --etcd_servers=http://${servicehost}:4001 \
-  --mesos_user=root \
-  --api_servers=$servicehost:8888 \
+  --etcd-servers=http://${servicehost}:4001 \
+  --mesos-user=root \
+  --api-servers=$servicehost:8888 \
   --v=2 >scheduler.log 2>&1 &
 ```
 
@@ -167,102 +167,95 @@ $ curl -L ${KUBERNETES_MASTER}/api/v1beta1/pods
 ```json
 {
   "kind": "PodList",
-  "creationTimestamp": null,
-  "selfLink": "/api/v1beta1/pods?namespace=",
-  "resourceVersion": 2800,
-  "apiVersion": "v1beta1",
+  "apiVersion": "v1beta3",
+  "metadata": {
+    "selfLink": "/api/v1beta3/pods",
+    "resourceVersion": "2737"
+  },
   "items": [
     {
-      "id": "nginx-id-01",
-      "uid": "2cf6694e-bd16-11e4-90fa-42010adf71e3",
-      "creationTimestamp": "2015-02-25T17:46:06Z",
-      "selfLink": "/api/v1beta1/pods/nginx-id-01?namespace=default",
-      "resourceVersion": 2751,
-      "namespace": "default",
-      "labels": {
-        "name": "foo"
-      },
-      "desiredState": {
-        "manifest": {
-          "version": "v1beta2",
-          "id": "",
-          "volumes": null,
-          "containers": [
-            {
-              "name": "nginx-01",
-              "image": "dockerfile/nginx",
-              "ports": [
-                {
-                  "hostPort": 31000,
-                  "containerPort": 80,
-                  "protocol": "TCP"
-                }
-              ],
-              "resources": {},
-              "livenessProbe": {
-                "httpGet": {
-                  "path": "/",
-                  "port": "80"
-                },
-                "initialDelaySeconds": 30,
-                "timeoutSeconds": 1
-              },
-              "terminationMessagePath": "/dev/termination-log",
-              "imagePullPolicy": "PullIfNotPresent",
-              "capabilities": {}
-            }
-          ],
-          "restartPolicy": {
-            "always": {}
-          },
-          "dnsPolicy": "ClusterFirst"
+      "metadata": {
+        "name": "nginx-id-01",
+        "namespace": "default",
+        "selfLink": "/api/v1beta3/namespaces/default/pods/nginx-id-01",
+        "uid": "abb07592-ff00-11e4-9ed7-525400309a8f",
+        "resourceVersion": "2659",
+        "creationTimestamp": "2015-05-20T14:58:27Z",
+        "labels": {
+          "name": "foo"
+        },
+        "annotations": {
+          "k8s.mesosphere.io/bindingHost": "10.2.0.5",
+          "k8s.mesosphere.io/executorId": "9c19f22c1f751616_k8sm-executor",
+          "k8s.mesosphere.io/offerId": "20150511-114826-83886602-5050-28892-O136765",
+          "k8s.mesosphere.io/portName_TCP_http": "31000",
+          "k8s.mesosphere.io/port_TCP_80": "31000",
+          "k8s.mesosphere.io/slaveId": "20150503-133627-83886602-5050-1268-S0",
+          "k8s.mesosphere.io/taskId": "pod.abcf6023-ff00-11e4-9533-525400309a8f"
         }
       },
-      "currentState": {
-        "manifest": {
-          "version": "",
-          "id": "",
-          "volumes": null,
-          "containers": null,
-          "restartPolicy": {}
-        },
-        "status": "Running",
-        "Condition": [
+      "spec": {
+        "containers": [
           {
-            "kind": "Ready",
-            "status": "Full"
+            "name": "nginx-01",
+            "image": "library/nginx",
+            "ports": [
+              {
+                "name": "http",
+                "containerPort": 80,
+                "protocol": "TCP"
+              }
+            ],
+            "resources": {},
+            "livenessProbe": {
+              "httpGet": {
+                "path": "/",
+                "port": "80"
+              },
+              "initialDelaySeconds": 30,
+              "timeoutSeconds": 1
+            },
+            "terminationMessagePath": "/dev/termination-log",
+            "imagePullPolicy": "IfNotPresent",
+            "capabilities": {},
+            "securityContext": {
+              "capabilities": {},
+              "privileged": false
+            }
           }
         ],
-        "host": "10.22.211.18",
-        "hostIP": "10.22.211.18",
-        "podIP": "172.17.6.20",
-        "info": {
-          "POD": {
+        "restartPolicy": "Always",
+        "dnsPolicy": "ClusterFirst",
+        "serviceAccount": "",
+        "host": "10.2.0.5"
+      },
+      "status": {
+        "phase": "Running",
+        "Condition": [
+          { 
+            "type": "Ready",
+            "status": "True"
+          }
+        ],
+        "hostIP": "10.2.0.5",
+        "podIP": "172.17.0.5",
+        "startTime": "2015-05-20T14:58:33Z",
+        "containerStatuses": [
+          { 
+            "name": "nginx-01",
             "state": {
               "running": {
-                "startedAt": "2015-02-25T17:46:07Z"
+                "startedAt": "2015-05-20T14:58:33Z"
               }
             },
-            "ready": false,
-            "restartCount": 0,
-            "podIP": "172.17.6.20",
-            "image": "kubernetes/pause:latest",
-            "imageID": "docker://6c4579af347b649857e915521132f15a06186d73faa62145e3eeeb6be0e97c27",
-            "containerID": "docker://811760e5070fd3c8e8014aff2a169831adc0c602833b540f689d76be6fadabf1"
-          },
-          "nginx-01": {
-            "state": {
-              "running": {
-                "startedAt": "2015-02-25T17:46:08Z"
-              }
-            },
+            "lastState": {},
             "ready": true,
             "restartCount": 0,
-            "image": "dockerfile/nginx",
-            "imageID": "docker://0180c66bffa9450b438970b9350295c1b5d4345a8b4573abe8e2b46b075e63f8",
-            "containerID": "docker://371ae01aa63b01875410f5bcca42ccdcc03872d64c351fbdcadcce2cba4a578f"
+            "image": "library/nginx",
+            "imageID": "docker://e32512dcfa0db6be6c122ce21c35a2c8746bb64eaaa6a13be981c5bdcf528d19",
+            "containerID": "docker://705bca065663290a8663679ae5eb5834060f57eb84577af11f1a06e498ac725b"
           }
-        }
+        ]
       }
     }
   ]

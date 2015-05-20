@@ -18,12 +18,15 @@ package service
 
 import (
 	"bufio"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"math/rand"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,12 +35,13 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/credentialprovider"
-	_ "github.com/GoogleCloudPlatform/kubernetes/pkg/healthz"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/healthz"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/cadvisor"
 	kconfig "github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/config"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/dockertools"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/mount"
 	"github.com/GoogleCloudPlatform/kubernetes/plugin/contrib/mesos/pkg/executor"
 	"github.com/GoogleCloudPlatform/kubernetes/plugin/contrib/mesos/pkg/executor/config"
 	"github.com/GoogleCloudPlatform/kubernetes/plugin/contrib/mesos/pkg/hyperkube"
@@ -101,18 +105,18 @@ func NewHyperKubeletExecutorServer() *KubeletExecutorServer {
 
 func (s *KubeletExecutorServer) addCoreFlags(fs *pflag.FlagSet) {
 	s.KubeletServer.AddFlags(fs)
-	fs.BoolVar(&s.RunProxy, "run_proxy", s.RunProxy, "Maintain a running kube-proxy instance as a child proc of this kubelet-executor.")
-	fs.IntVar(&s.ProxyLogV, "proxy_logv", s.ProxyLogV, "Log verbosity of the child kube-proxy.")
-	fs.StringVar(&s.ProxyLogfile, "proxy_logfile", s.ProxyLogfile, "Path to the kube-proxy log file.")
-	fs.BoolVar(&s.ProxyBindall, "proxy_bindall", s.ProxyBindall, "When true will cause kube-proxy to bind to 0.0.0.0.")
-	fs.DurationVar(&s.SuicideTimeout, "suicide_timeout", s.SuicideTimeout, "Self-terminate after this period of inactivity. Zero disables suicide watch.")
-	fs.IntVar(&s.ShutdownFD, "shutdown_fd", s.ShutdownFD, "File descriptor used to signal shutdown to external watchers, requires shutdown_fifo flag")
-	fs.StringVar(&s.ShutdownFIFO, "shutdown_fifo", s.ShutdownFIFO, "FIFO used to signal shutdown to external watchers, requires shutdown_fd flag")
+	fs.BoolVar(&s.RunProxy, "run-proxy", s.RunProxy, "Maintain a running kube-proxy instance as a child proc of this kubelet-executor.")
+	fs.IntVar(&s.ProxyLogV, "proxy-logv", s.ProxyLogV, "Log verbosity of the child kube-proxy.")
+	fs.StringVar(&s.ProxyLogfile, "proxy-logfile", s.ProxyLogfile, "Path to the kube-proxy log file.")
+	fs.BoolVar(&s.ProxyBindall, "proxy-bindall", s.ProxyBindall, "When true will cause kube-proxy to bind to 0.0.0.0.")
+	fs.DurationVar(&s.SuicideTimeout, "suicide-timeout", s.SuicideTimeout, "Self-terminate after this period of inactivity. Zero disables suicide watch.")
+	fs.IntVar(&s.ShutdownFD, "shutdown-fd", s.ShutdownFD, "File descriptor used to signal shutdown to external watchers, requires shutdown-fifo flag")
+	fs.StringVar(&s.ShutdownFIFO, "shutdown-fifo", s.ShutdownFIFO, "FIFO used to signal shutdown to external watchers, requires shutdown-fd flag")
 }
 
 func (s *KubeletExecutorServer) AddStandaloneFlags(fs *pflag.FlagSet) {
 	s.addCoreFlags(fs)
-	fs.StringVar(&s.ProxyExec, "proxy_exec", s.ProxyExec, "Path to the kube-proxy executable.")
+	fs.StringVar(&s.ProxyExec, "proxy-exec", s.ProxyExec, "Path to the kube-proxy executable.")
 }
 
 func (s *KubeletExecutorServer) AddHyperkubeFlags(fs *pflag.FlagSet) {
@@ -164,6 +168,11 @@ func (s *KubeletExecutorServer) Run(hks hyperkube.Interface, _ []string) error {
 		LowThresholdPercent:  s.ImageGCLowThresholdPercent,
 	}
 
+	diskSpacePolicy := kubelet.DiskSpacePolicy{
+		DockerFreeDiskMB: s.LowDiskSpaceThresholdMB,
+		RootFreeDiskMB:   s.LowDiskSpaceThresholdMB,
+	}
+
 	//TODO(jdef) intentionally NOT initializing a cloud provider here since:
 	//(a) the kubelet doesn't actually use it
 	//(b) we don't need to create N-kubelet connections to zookeeper for no good reason
@@ -174,6 +183,27 @@ func (s *KubeletExecutorServer) Run(hks hyperkube.Interface, _ []string) error {
 	if err != nil {
 		return err
 	}
+
+	var tlsOptions *kubelet.TLSOptions
+	if s.TLSCertFile != "" && s.TLSPrivateKeyFile != "" {
+		tlsOptions = &kubelet.TLSOptions{
+			Config: &tls.Config{
+				// Change default from SSLv3 to TLSv1.0 (because of POODLE vulnerability).
+				MinVersion: tls.VersionTLS10,
+				// Populate PeerCertificates in requests, but don't yet reject connections without certificates.
+				ClientAuth: tls.RequestClientCert,
+			},
+			CertFile: s.TLSCertFile,
+			KeyFile:  s.TLSPrivateKeyFile,
+		}
+	}
+
+	mounter := mount.New()
+	if s.Containerized {
+		log.V(2).Info("Running kubelet in containerized mode (experimental)")
+		mounter = &mount.NsenterMounter{}
+	}
+
 	kcfg := app.KubeletConfig{
 		Address:                        s.Address,
 		AllowPrivileged:                s.AllowPrivileged,
@@ -190,6 +220,7 @@ func (s *KubeletExecutorServer) Run(hks hyperkube.Interface, _ []string) error {
 		ClusterDomain:                  s.ClusterDomain,
 		ClusterDNS:                     s.ClusterDNS,
 		Port:                           s.Port,
+		ReadOnlyPort:                   s.ReadOnlyPort,
 		CadvisorInterface:              cadvisorInterface,
 		EnableServer:                   s.EnableServer,
 		EnableDebuggingHandlers:        s.EnableDebuggingHandlers,
@@ -200,13 +231,37 @@ func (s *KubeletExecutorServer) Run(hks hyperkube.Interface, _ []string) error {
 		NetworkPlugins:                 app.ProbeNetworkPlugins(),
 		NetworkPluginName:              s.NetworkPluginName,
 		StreamingConnectionIdleTimeout: s.StreamingConnectionIdleTimeout,
+		TLSOptions:                     tlsOptions,
 		ImageGCPolicy:                  imageGCPolicy,
+		DiskSpacePolicy:                diskSpacePolicy,
+		Cloud:                          nil, // TODO(jdef) Cloud, specifying null here because we don't want all kubelets polling mesos-master; need to account for this in the cloudprovider impl
+		NodeStatusUpdateFrequency: s.NodeStatusUpdateFrequency,
+		ResourceContainer:         s.ResourceContainer,
+		CgroupRoot:                s.CgroupRoot,
+		ContainerRuntime:          s.ContainerRuntime,
+		Mounter:                   mounter,
+		DockerDaemonContainer:     s.DockerDaemonContainer,
+		ConfigureCBR0:             s.ConfigureCBR0,
+		MaxPods:                   s.MaxPods,
 	}
 
 	finished := make(chan struct{})
-	app.RunKubelet(&kcfg, app.KubeletBuilder(func(kc *app.KubeletConfig) (app.KubeletBootstrap, *kconfig.PodConfig, error) {
+	err = app.RunKubelet(&kcfg, app.KubeletBuilder(func(kc *app.KubeletConfig) (app.KubeletBootstrap, *kconfig.PodConfig, error) {
 		return s.createAndInitKubelet(kc, hks, clientConfig, shutdownCloser, finished)
 	}))
+	if err != nil {
+		return err
+	}
+
+	if s.HealthzPort > 0 {
+		healthz.DefaultHealthz()
+		go util.Forever(func() {
+			err := http.ListenAndServe(net.JoinHostPort(s.HealthzBindAddress.String(), strconv.Itoa(s.HealthzPort)), nil)
+			if err != nil {
+				log.Errorf("Starting health server failed: %v", err)
+			}
+		}, 5*time.Second)
+	}
 
 	// block until executor is shut down or commits shutdown
 	select {}
@@ -272,7 +327,7 @@ func (ks *KubeletExecutorServer) createAndInitKubelet(
 		kc.CadvisorInterface,
 		kc.ImageGCPolicy,
 		kc.DiskSpacePolicy,
-		nil, // TODO(jdef) Cloud, specifying null here because we don't want all kubelets polling mesos-master; need to account for this in the cloudprovider impl
+		kc.Cloud,
 		kc.NodeStatusUpdateFrequency,
 		kc.ResourceContainer,
 		kc.OSInterface,
@@ -404,7 +459,7 @@ func (kl *kubeletExecutor) runProxyService() {
 		bindAddress = kl.address.String()
 	}
 	args = append(args,
-		fmt.Sprintf("--bind_address=%s", bindAddress),
+		fmt.Sprintf("--bind-address=%s", bindAddress),
 		fmt.Sprintf("--v=%d", kl.proxyLogV),
 		"--logtostderr=true",
 	)
@@ -416,11 +471,13 @@ func (kl *kubeletExecutor) runProxyService() {
 		}
 	}
 	appendStringArg("master", kl.clientConfig.Host)
-	appendStringArg("api_version", kl.clientConfig.Version)
-	appendStringArg("client_certificate", kl.clientConfig.CertFile)
-	appendStringArg("client_key", kl.clientConfig.KeyFile)
-	appendStringArg("certificate_authority", kl.clientConfig.CAFile)
-	args = append(args, fmt.Sprintf("--insecure_skip_tls_verify=%t", kl.clientConfig.Insecure))
+	/* TODO(jdef) move these flags to a config file pointed to by --kubeconfig
+	appendStringArg("api-version", kl.clientConfig.Version)
+	appendStringArg("client-certificate", kl.clientConfig.CertFile)
+	appendStringArg("client-key", kl.clientConfig.KeyFile)
+	appendStringArg("certificate-authority", kl.clientConfig.CAFile)
+	args = append(args, fmt.Sprintf("--insecure-skip-tls-verify=%t", kl.clientConfig.Insecure))
+	*/
 
 	log.Infof("Spawning process executable %s with args '%+v'", kl.proxyExec, args)
 
