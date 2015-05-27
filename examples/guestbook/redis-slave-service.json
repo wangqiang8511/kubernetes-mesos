@@ -1,12 +1,19 @@
 {
-  "id": "redisslave",
   "kind": "Service",
-  "apiVersion": "v1beta1",
-  "port": 10001,
-  "labels": {
-    "name": "redisslave"
+  "apiVersion": "v1beta3",
+  "metadata":{
+    "name": "redisslave",
+    "labels": { "name": "redisslave" }
   },
-  "selector": {
-    "name": "redisslave"
+  "spec": {
+    "ports": [
+      {
+        "port": 10001,
+        "protocol": "TCP"
+      }
+    ],
+    "selector": {
+      "name": "redisslave"
+    }
   }
 }
