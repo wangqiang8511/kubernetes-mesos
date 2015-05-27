@@ -205,20 +205,26 @@ func (s *KubeletExecutorServer) Run(hks hyperkube.Interface, _ []string) error {
 	}
 
 	kcfg := app.KubeletConfig{
-		Address:                        s.Address,
-		AllowPrivileged:                s.AllowPrivileged,
-		HostNetworkSources:             hostNetworkSources,
-		HostnameOverride:               s.HostnameOverride,
-		RootDirectory:                  s.RootDirectory,
-		PodInfraContainerImage:         s.PodInfraContainerImage,
-		SyncFrequency:                  s.SyncFrequency,
-		RegistryPullQPS:                s.RegistryPullQPS,
-		RegistryBurst:                  s.RegistryBurst,
-		MinimumGCAge:                   s.MinimumGCAge,
-		MaxPerPodContainerCount:        s.MaxPerPodContainerCount,
-		MaxContainerCount:              s.MaxContainerCount,
-		ClusterDomain:                  s.ClusterDomain,
-		ClusterDNS:                     s.ClusterDNS,
+		Address:            s.Address,
+		AllowPrivileged:    s.AllowPrivileged,
+		HostNetworkSources: hostNetworkSources,
+		HostnameOverride:   s.HostnameOverride,
+		RootDirectory:      s.RootDirectory,
+		// ConfigFile: ""
+		// ManifestURL: ""
+		// FileCheckFrequency
+		// HTTPCheckFrequency
+		PodInfraContainerImage:  s.PodInfraContainerImage,
+		SyncFrequency:           s.SyncFrequency,
+		RegistryPullQPS:         s.RegistryPullQPS,
+		RegistryBurst:           s.RegistryBurst,
+		MinimumGCAge:            s.MinimumGCAge,
+		MaxPerPodContainerCount: s.MaxPerPodContainerCount,
+		MaxContainerCount:       s.MaxContainerCount,
+		RegisterNode:            s.RegisterNode,
+		ClusterDomain:           s.ClusterDomain,
+		ClusterDNS:              s.ClusterDNS,
+		// RunOnce: false
 		Port:                           s.Port,
 		ReadOnlyPort:                   s.ReadOnlyPort,
 		CadvisorInterface:              cadvisorInterface,

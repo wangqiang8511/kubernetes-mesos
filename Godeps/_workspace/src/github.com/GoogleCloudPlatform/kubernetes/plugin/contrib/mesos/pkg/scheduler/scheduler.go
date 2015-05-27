@@ -423,7 +423,7 @@ func (k *KubernetesScheduler) StatusUpdate(driver bindings.SchedulerDriver, task
 		}
 	case mesos.TaskState_TASK_FAILED:
 		if task, _ := k.taskRegistry.UpdateStatus(taskStatus); task != nil {
-			if task.Has(podtask.Launched) && messages.CreateBindingFailure == taskStatus.GetMessage() {
+			if task.Has(podtask.Launched) && !task.Has(podtask.Bound) {
 				go k.plugin.reconcilePod(task.Pod)
 				return
 			}
