@@ -75,6 +75,10 @@ type ContainerManifest struct {
 	// used must be specified.
 	// Optional: Default to false.
 	HostNetwork bool `json:"hostNetwork,omitempty" description:"host networking requested for this pod"`
+	// ImagePullSecrets is an optional list of references to secrets in the same namespace to use for pulling any of the images used by this PodSpec.
+	// If specified, these secrets will be passed to individual puller implementations for them to use.  For example,
+	// in the case of docker, only DockerConfig type secrets are honored.
+	ImagePullSecrets []LocalObjectReference `json:"imagePullSecrets,omitempty" description:"list of references to secrets in the same namespace available for pulling the container images"`
 }
 
 // ContainerManifestList is used to communicate container manifests to kubelet.
@@ -129,6 +133,8 @@ type VolumeSource struct {
 	Glusterfs *GlusterfsVolumeSource `json:"glusterfs" description:"Glusterfs volume that will be mounted on the host machine "`
 	// PersistentVolumeClaimVolumeSource represents a reference to a PersistentVolumeClaim in the same namespace
 	PersistentVolumeClaimVolumeSource *PersistentVolumeClaimVolumeSource `json:"persistentVolumeClaim,omitempty" description:"a reference to a PersistentVolumeClaim in the same namespace"`
+	// RBD represents a Rados Block Device mount on the host that shares a pod's lifetime
+	RBD *RBDVolumeSource `json:"rbd" description:"rados block volume that will be mounted on the host machine"`
 }
 
 // Similar to VolumeSource but meant for the administrator who creates PVs.
@@ -148,6 +154,8 @@ type PersistentVolumeSource struct {
 	Glusterfs *GlusterfsVolumeSource `json:"glusterfs" description:"Glusterfs volume resource provisioned by an admin"`
 	// NFS represents an NFS mount on the host
 	NFS *NFSVolumeSource `json:"nfs" description:"NFS volume resource provisioned by an admin"`
+	// RBD represents a Rados Block Device mount on the host that shares a pod's lifetime
+	RBD *RBDVolumeSource `json:"rbd" description:"rados block volume that will be mounted on the host machine"`
 }
 
 type PersistentVolumeClaimVolumeSource struct {
@@ -368,6 +376,30 @@ type SecretVolumeSource struct {
 	Target ObjectReference `json:"target" description:"target is a reference to a secret"`
 }
 
+// RBDVolumeSource represents a Rados Block Device Mount that lasts the lifetime of a pod
+type RBDVolumeSource struct {
+	// Required: CephMonitors is a collection of Ceph monitors
+	CephMonitors []string `json:"monitors" description:"a collection of Ceph monitors"`
+	// Required: RBDImage is the rados image name
+	RBDImage string `json:"image" description:"rados image name"`
+	// Required: Filesystem type to mount.
+	// Must be a filesystem type supported by the host operating system.
+	// Ex. "ext4", "xfs", "ntfs"
+	// TODO: how do we prevent errors in the filesystem from compromising the machine
+	FSType string `json:"fsType,omitempty" description:"file system type to mount, such as ext4, xfs, ntfs"`
+	// Optional: RadosPool is the rados pool name,default is rbd
+	RBDPool string `json:"pool" description:"rados pool name; default is rbd; optional"`
+	// Optional: RBDUser is the rados user name, default is admin
+	RadosUser string `json:"user" description:"rados user name; default is admin; optional"`
+	// Optional: Keyring is the path to key ring for RBDUser, default is /etc/ceph/keyring
+	Keyring string `json:"keyring" description:"keyring is the path to key ring for rados user; default is /etc/ceph/keyring; optional"`
+	// Optional: SecretRef is name of the authentication secret for RBDUser, default is empty.
+	SecretRef *LocalObjectReference `json:"secretRef" description:"name of a secret to authenticate the RBD user; if provided overrides keyring; optional"`
+	// Optional: Defaults to false (read/write). ReadOnly here will force
+	// the ReadOnly setting in VolumeMounts.
+	ReadOnly bool `json:"readOnly,omitempty"  description:"rbd volume to be mounted with read-only permissions"`
+}
+
 // ContainerPort represents a network port in a single container
 type ContainerPort struct {
 	// Optional: If specified, this must be a DNS_LABEL.  Each named port
@@ -574,7 +606,7 @@ type TypeMeta struct {
 	SelfLink          string    `json:"selfLink,omitempty" description:"URL for the object; populated by the system, read-only"`
 	ResourceVersion   uint64    `json:"resourceVersion,omitempty" description:"string that identifies the internal version of this object that can be used by clients to determine when objects have changed; populated by the system, read-only; value must be treated as opaque by clients and passed unmodified back to the server: http://docs.k8s.io/api-conventions.md#concurrency-control-and-consistency"`
 	APIVersion        string    `json:"apiVersion,omitempty" description:"version of the schema the object should have"`
-	Namespace         string    `json:"namespace,omitempty" description:"namespace to which the object belongs; must be a DNS_SUBDOMAIN; 'default' by default; cannot be updated"`
+	Namespace         string    `json:"namespace,omitempty" description:"namespace to which the object belongs; must be a DNS_LABEL; 'default' by default; cannot be updated"`
 
 	// DeletionTimestamp is the time after which this resource will be deleted. This
 	// field is set by the server when a graceful deletion is requested by the user, and is not
@@ -803,6 +835,24 @@ const (
 	ServiceAffinityNone ServiceAffinity = "None"
 )
 
+// Service Type string describes ingress methods for a service
+type ServiceType string
+
+const (
+	// ServiceTypeClusterIP means a service will only be accessible inside the
+	// cluster, via the portal IP.
+	ServiceTypeClusterIP ServiceType = "ClusterIP"
+
+	// ServiceTypeNodePort means a service will be exposed on one port of
+	// every node, in addition to 'ClusterIP' type.
+	ServiceTypeNodePort ServiceType = "NodePort"
+
+	// ServiceTypeLoadBalancer means a service will be exposed via an
+	// external load balancer (if the cloud provider supports it), in addition
+	// to 'NodePort' type.
+	ServiceTypeLoadBalancer ServiceType = "LoadBalancer"
+)
+
 const (
 	// PortalIPNone - do not assign a portal IP
 	// no proxying required and no environment variables should be created for pods
@@ -841,9 +891,12 @@ type Service struct {
 	// An external load balancer should be set up via the cloud-provider
 	CreateExternalLoadBalancer bool `json:"createExternalLoadBalancer,omitempty" description:"set up a cloud-provider-specific load balancer on an external IP"`
 
-	// PublicIPs are used by external load balancers, or can be set by
+	// Type determines how the service will be exposed.  Valid options: ClusterIP, NodePort, LoadBalancer
+	Type ServiceType `json:"type,omitempty" description:"type of this service; must be ClusterIP, NodePort, or LoadBalancer; defaults to ClusterIP"`
+
+	// Deprecated. PublicIPs are used by external load balancers, or can be set by
 	// users to handle external traffic that arrives at a node.
-	PublicIPs []string `json:"publicIPs,omitempty" description:"externally visible IPs (e.g. load balancers) that should be proxied to this service"`
+	PublicIPs []string `json:"publicIPs,omitempty" description:"deprecated. externally visible IPs (e.g. load balancers) that should be proxied to this service"`
 
 	// PortalIP is usually assigned by the master.  If specified by the user
 	// we will try to respect it or else fail the request.  This field can
@@ -864,6 +917,29 @@ type Service struct {
 	// array.  If this field is not specified, it will be populated from
 	// the legacy fields.
 	Ports []ServicePort `json:"ports" description:"ports to be exposed on the service; if this field is specified, the legacy fields (Port, PortName, Protocol, and ContainerPort) will be overwritten by the first member of this array; if this field is not specified, it will be populated from the legacy fields"`
+
+	// LoadBalancer contains the current status of the load-balancer,
+	// if one is present.
+	LoadBalancerStatus LoadBalancerStatus `json:"loadBalancerStatus,omitempty" description:"status of load-balancer"`
+}
+
+// LoadBalancerStatus represents the status of a load-balancer
+type LoadBalancerStatus struct {
+	// Ingress is a list containing ingress points for the load-balancer;
+	// traffic intended for the service should be sent to these ingress points.
+	Ingress []LoadBalancerIngress `json:"ingress,omitempty" description:"load-balancer ingress points"`
+}
+
+// LoadBalancerIngress represents the status of a load-balancer ingress point:
+// traffic intended for the service should be sent to an ingress point.
+type LoadBalancerIngress struct {
+	// IP is set for load-balancer ingress points that are IP based
+	// (typically GCE or OpenStack load-balancers)
+	IP string `json:"ip,omitempty" description:"IP address of ingress point"`
+
+	// Hostname is set for load-balancer ingress points that are DNS based
+	// (typically AWS load-balancers)
+	Hostname string `json:"hostname,omitempty" description:"hostname of ingress point"`
 }
 
 type ServicePort struct {
@@ -886,6 +962,10 @@ type ServicePort struct {
 	// of Port is used (an identity map) - note this is a different default
 	// than Service.ContainerPort.
 	ContainerPort util.IntOrString `json:"containerPort" description:"the port to access on the containers belonging to pods targeted by the service; defaults to the service port"`
+
+	// The port on each node on which this service is exposed.
+	// Default is to auto-allocate a port if the ServiceType of this Service requires one.
+	NodePort int `json:"nodePort" description:"the port on each node on which this service is exposed"`
 }
 
 // ServiceAccount binds together:
@@ -1409,6 +1489,12 @@ type ObjectReference struct {
 	FieldPath string `json:"fieldPath,omitempty" description:"if referring to a piece of an object instead of an entire object, this string should contain a valid JSON/Go field access statement, such as desiredState.manifest.containers[2]"`
 }
 
+// LocalObjectReference contains enough information to let you locate the referenced object inside the same namespace.
+type LocalObjectReference struct {
+	//TODO: Add other useful fields.  apiVersion, kind, uid?
+	Name string `json:"name,omitempty" description:"name of the referent"`
+}
+
 type SerializedReference struct {
 	TypeMeta  `json:",inline"`
 	Reference ObjectReference `json:"reference,omitempty" description:"the reference to an object in the system"`
@@ -1505,6 +1591,10 @@ type PodSpec struct {
 	// used must be specified.
 	// Optional: Default to false.
 	HostNetwork bool `json:"hostNetwork,omitempty" description:"host networking requested for this pod"`
+	// ImagePullSecrets is an optional list of references to secrets in the same namespace to use for pulling any of the images used by this PodSpec.
+	// If specified, these secrets will be passed to individual puller implementations for them to use.  For example,
+	// in the case of docker, only DockerConfig type secrets are honored.
+	ImagePullSecrets []LocalObjectReference `json:"imagePullSecrets,omitempty" description:"list of references to secrets in the same namespace available for pulling the container images"`
 }
 
 // List holds a list of objects, which may not be known by the server.

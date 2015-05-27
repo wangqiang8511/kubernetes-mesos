@@ -14,6 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Some file descriptor manipulation funcs, inspired by
+// Some file descriptor manipulation funcs (Unix-Only), inspired by
 // https://github.com/skarnet/execline/blob/master/src/execline/redirfd.c
 package redirfd

@@ -65,7 +65,12 @@ func (g *conversionGenerator) GenerateConversionsForType(version string, reflect
 	if internalObjType.Kind() != reflect.Ptr {
 		return fmt.Errorf("created object should be of type Ptr: ", internalObjType.Kind())
 	}
-	return g.generateConversionsBetween(reflection, internalObjType.Elem())
+	inErr := g.generateConversionsBetween(reflection, internalObjType.Elem())
+	outErr := g.generateConversionsBetween(internalObjType.Elem(), reflection)
+	if inErr != nil || outErr != nil {
+		return fmt.Errorf("errors: %v, %v", inErr, outErr)
+	}
+	return nil
 }
 
 func (g *conversionGenerator) generateConversionsBetween(inType, outType reflect.Type) error {
@@ -128,9 +133,7 @@ func (g *conversionGenerator) generateConversionsBetween(inType, outType reflect
 			return inErr
 		}
 		if !existingConversion {
-			if _, found := g.convertibles[outType]; !found {
-				g.convertibles[inType] = outType
-			}
+			g.convertibles[inType] = outType
 		}
 		return nil
 	default:
@@ -226,7 +229,9 @@ func (s byName) Len() int {
 }
 
 func (s byName) Less(i, j int) bool {
-	return s[i].Name() < s[j].Name()
+	fullNameI := s[i].PkgPath() + "/" + s[i].Name()
+	fullNameJ := s[j].PkgPath() + "/" + s[j].Name()
+	return fullNameI < fullNameJ
 }
 
 func (s byName) Swap(i, j int) {
@@ -253,9 +258,6 @@ func (g *conversionGenerator) WriteConversionFunctions(w io.Writer) error {
 		if err := g.writeConversionForType(buffer, inType, outType, indent); err != nil {
 			return err
 		}
-		if err := g.writeConversionForType(buffer, outType, inType, indent); err != nil {
-			return err
-		}
 	}
 	if err := buffer.flushLines(w); err != nil {
 		return err
@@ -265,7 +267,7 @@ func (g *conversionGenerator) WriteConversionFunctions(w io.Writer) error {
 
 func (g *conversionGenerator) writeRegisterHeader(b *buffer, indent int) {
 	b.addLine("func init() {\n", indent)
-	b.addLine("err := newer.Scheme.AddGeneratedConversionFuncs(\n", indent+1)
+	b.addLine("err := api.Scheme.AddGeneratedConversionFuncs(\n", indent+1)
 }
 
 func (g *conversionGenerator) writeRegisterFooter(b *buffer, indent int) {
@@ -283,7 +285,6 @@ func (g *conversionGenerator) RegisterConversionFunctions(w io.Writer) error {
 	var names []string
 	for inType, outType := range g.convertibles {
 		names = append(names, g.conversionFunctionName(inType, outType))
-		names = append(names, g.conversionFunctionName(outType, inType))
 	}
 	sort.Strings(names)
 

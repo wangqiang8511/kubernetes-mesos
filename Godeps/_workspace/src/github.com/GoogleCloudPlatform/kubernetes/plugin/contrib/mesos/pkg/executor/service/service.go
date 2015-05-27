@@ -132,7 +132,7 @@ func (s *KubeletExecutorServer) syncExternalShutdownWatcher() (io.Closer, error)
 	}
 	// redirfd -w n fifo ...  # (blocks until the fifo is read)
 	log.Infof("blocked, waiting for shutdown reader for FD %d FIFO at %s", s.ShutdownFD, s.ShutdownFIFO)
-	return redirfd.Write.Redirect(true, false, s.ShutdownFD, s.ShutdownFIFO)
+	return redirfd.Write.Redirect(true, false, redirfd.FileDescriptor(s.ShutdownFD), s.ShutdownFIFO)
 }
 
 // Run runs the specified KubeletExecutorServer.
@@ -305,7 +305,7 @@ func (ks *KubeletExecutorServer) createAndInitKubelet(
 	pc := kconfig.NewPodConfig(kconfig.PodConfigNotificationSnapshotAndUpdates, kc.Recorder)
 	updates := pc.Channel(MESOS_CFG_SOURCE)
 
-	kubelet, err := kubelet.NewMainKubelet(
+	klet, err := kubelet.NewMainKubelet(
 		kc.Hostname,
 		kc.DockerClient,
 		kubeClient,
@@ -316,6 +316,7 @@ func (ks *KubeletExecutorServer) createAndInitKubelet(
 		kc.RegistryBurst,
 		gcPolicy,
 		pc.SeenAllSources,
+		kc.RegisterNode,
 		kc.ClusterDomain,
 		net.IP(kc.ClusterDNS),
 		kc.MasterServiceNamespace,
@@ -346,7 +347,7 @@ func (ks *KubeletExecutorServer) createAndInitKubelet(
 	// get rid of it from executor.Config
 	kubeletFinished := make(chan struct{})
 	exec := executor.New(executor.Config{
-		Kubelet:         kubelet,
+		Kubelet:         klet,
 		Updates:         updates,
 		SourceName:      MESOS_CFG_SOURCE,
 		APIClient:       kc.KubeClient,
@@ -360,10 +361,14 @@ func (ks *KubeletExecutorServer) createAndInitKubelet(
 				}
 			}
 		},
+		ExitFunc: os.Exit,
+		PodStatusFunc: func(kl *kubelet.Kubelet, pod *api.Pod) (api.PodStatus, error) {
+			return kl.GeneratePodStatus(pod)
+		},
 	})
 
 	k := &kubeletExecutor{
-		Kubelet:         kubelet,
+		Kubelet:         klet,
 		finished:        finished,
 		runProxy:        ks.RunProxy,
 		proxyLogV:       ks.ProxyLogV,

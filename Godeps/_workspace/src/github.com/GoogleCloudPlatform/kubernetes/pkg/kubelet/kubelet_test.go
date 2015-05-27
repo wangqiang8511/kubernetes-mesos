@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	apierrors "github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/resource"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/capabilities"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/record"
@@ -44,6 +45,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/dockertools"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/metrics"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/network"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/types"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/version"
@@ -67,7 +69,7 @@ type TestKubelet struct {
 	fakeMirrorClient *fakeMirrorClient
 }
 
-const testKubeletHostname = "testnode"
+const testKubeletHostname = "127.0.0.1"
 
 func newTestKubelet(t *testing.T) *TestKubelet {
 	fakeDocker := &dockertools.FakeDockerClient{Errors: make(map[string]error), RemovedImages: util.StringSet{}}
@@ -79,7 +81,7 @@ func newTestKubelet(t *testing.T) *TestKubelet {
 	kubelet.kubeClient = fakeKubeClient
 	kubelet.os = kubecontainer.FakeOS{}
 
-	kubelet.hostname = "testnode"
+	kubelet.hostname = testKubeletHostname
 	kubelet.runtimeUpThreshold = maxWaitForContainerRuntime
 	kubelet.networkPlugin, _ = network.InitNetworkPlugin([]network.NetworkPlugin{}, "", network.NewFakeHost(nil))
 	if tempDir, err := ioutil.TempDir("/tmp", "kubelet_test."); err != nil {
@@ -365,7 +367,7 @@ func generatePodInfraContainerHash(pod *api.Pod) uint64 {
 		Image: dockertools.PodInfraContainerImage,
 		Ports: ports,
 	}
-	return dockertools.HashContainer(container)
+	return kubecontainer.HashContainer(container)
 }
 
 func TestSyncPodsDoesNothing(t *testing.T) {
@@ -395,7 +397,7 @@ func TestSyncPodsDoesNothing(t *testing.T) {
 	fakeDocker.ContainerList = []docker.APIContainers{
 		{
 			// format is // k8s_<container-id>_<pod-fullname>_<pod-uid>_<random>
-			Names: []string{"/k8s_bar." + strconv.FormatUint(dockertools.HashContainer(&container), 16) + "_foo_new_12345678_0"},
+			Names: []string{"/k8s_bar." + strconv.FormatUint(kubecontainer.HashContainer(&container), 16) + "_foo_new_12345678_0"},
 			ID:    "1234",
 		},
 		{
@@ -3024,7 +3026,7 @@ func TestHandleNodeSelector(t *testing.T) {
 	testKubelet := newTestKubelet(t)
 	kl := testKubelet.kubelet
 	kl.nodeLister = testNodeLister{nodes: []api.Node{
-		{ObjectMeta: api.ObjectMeta{Name: "testnode", Labels: map[string]string{"key": "B"}}},
+		{ObjectMeta: api.ObjectMeta{Name: testKubeletHostname, Labels: map[string]string{"key": "B"}}},
 	}}
 	testKubelet.fakeCadvisor.On("MachineInfo").Return(&cadvisorApi.MachineInfo{}, nil)
 	testKubelet.fakeCadvisor.On("DockerImagesFsInfo").Return(cadvisorApiv2.FsInfo{}, nil)
@@ -3239,7 +3241,7 @@ func TestUpdateNewNodeStatus(t *testing.T) {
 	kubelet := testKubelet.kubelet
 	kubeClient := testKubelet.fakeKubeClient
 	kubeClient.ReactFn = testclient.NewSimpleFake(&api.NodeList{Items: []api.Node{
-		{ObjectMeta: api.ObjectMeta{Name: "testnode"}},
+		{ObjectMeta: api.ObjectMeta{Name: testKubeletHostname}},
 	}}).ReactFn
 	machineInfo := &cadvisorApi.MachineInfo{
 		MachineID:      "123",
@@ -3257,7 +3259,7 @@ func TestUpdateNewNodeStatus(t *testing.T) {
 	}
 	mockCadvisor.On("VersionInfo").Return(versionInfo, nil)
 	expectedNode := &api.Node{
-		ObjectMeta: api.ObjectMeta{Name: "testnode"},
+		ObjectMeta: api.ObjectMeta{Name: testKubeletHostname},
 		Spec:       api.NodeSpec{},
 		Status: api.NodeStatus{
 			Conditions: []api.NodeCondition{
@@ -3284,6 +3286,7 @@ func TestUpdateNewNodeStatus(t *testing.T) {
 				api.ResourceMemory: *resource.NewQuantity(1024, resource.BinarySI),
 				api.ResourcePods:   *resource.NewQuantity(0, resource.DecimalSI),
 			},
+			Addresses: []api.NodeAddress{{Type: api.NodeLegacyHostIP, Address: "127.0.0.1"}},
 		},
 	}
 
@@ -3317,7 +3320,7 @@ func TestUpdateExistingNodeStatus(t *testing.T) {
 	kubeClient := testKubelet.fakeKubeClient
 	kubeClient.ReactFn = testclient.NewSimpleFake(&api.NodeList{Items: []api.Node{
 		{
-			ObjectMeta: api.ObjectMeta{Name: "testnode"},
+			ObjectMeta: api.ObjectMeta{Name: testKubeletHostname},
 			Spec:       api.NodeSpec{},
 			Status: api.NodeStatus{
 				Conditions: []api.NodeCondition{
@@ -3353,7 +3356,7 @@ func TestUpdateExistingNodeStatus(t *testing.T) {
 	}
 	mockCadvisor.On("VersionInfo").Return(versionInfo, nil)
 	expectedNode := &api.Node{
-		ObjectMeta: api.ObjectMeta{Name: "testnode"},
+		ObjectMeta: api.ObjectMeta{Name: testKubeletHostname},
 		Spec:       api.NodeSpec{},
 		Status: api.NodeStatus{
 			Conditions: []api.NodeCondition{
@@ -3380,6 +3383,7 @@ func TestUpdateExistingNodeStatus(t *testing.T) {
 				api.ResourceMemory: *resource.NewQuantity(1024, resource.BinarySI),
 				api.ResourcePods:   *resource.NewQuantity(0, resource.DecimalSI),
 			},
+			Addresses: []api.NodeAddress{{Type: api.NodeLegacyHostIP, Address: "127.0.0.1"}},
 		},
 	}
 
@@ -3419,7 +3423,7 @@ func TestUpdateNodeStatusWithoutContainerRuntime(t *testing.T) {
 	fakeDocker.VersionInfo = []string{}
 
 	kubeClient.ReactFn = testclient.NewSimpleFake(&api.NodeList{Items: []api.Node{
-		{ObjectMeta: api.ObjectMeta{Name: "testnode"}},
+		{ObjectMeta: api.ObjectMeta{Name: testKubeletHostname}},
 	}}).ReactFn
 	mockCadvisor := testKubelet.fakeCadvisor
 	machineInfo := &cadvisorApi.MachineInfo{
@@ -3438,7 +3442,7 @@ func TestUpdateNodeStatusWithoutContainerRuntime(t *testing.T) {
 	mockCadvisor.On("VersionInfo").Return(versionInfo, nil)
 
 	expectedNode := &api.Node{
-		ObjectMeta: api.ObjectMeta{Name: "testnode"},
+		ObjectMeta: api.ObjectMeta{Name: testKubeletHostname},
 		Spec:       api.NodeSpec{},
 		Status: api.NodeStatus{
 			Conditions: []api.NodeCondition{
@@ -3465,6 +3469,7 @@ func TestUpdateNodeStatusWithoutContainerRuntime(t *testing.T) {
 				api.ResourceMemory: *resource.NewQuantity(1024, resource.BinarySI),
 				api.ResourcePods:   *resource.NewQuantity(0, resource.DecimalSI),
 			},
+			Addresses: []api.NodeAddress{{Type: api.NodeLegacyHostIP, Address: "127.0.0.1"}},
 		},
 	}
 
@@ -3895,12 +3900,12 @@ func TestSyncPodsWithRestartPolicy(t *testing.T) {
 	exitedAPIContainers := []docker.APIContainers{
 		{
 			// format is // k8s_<container-id>_<pod-fullname>_<pod-uid>
-			Names: []string{"/k8s_succeeded." + strconv.FormatUint(dockertools.HashContainer(&containers[0]), 16) + "_foo_new_12345678_0"},
+			Names: []string{"/k8s_succeeded." + strconv.FormatUint(kubecontainer.HashContainer(&containers[0]), 16) + "_foo_new_12345678_0"},
 			ID:    "1234",
 		},
 		{
 			// format is // k8s_<container-id>_<pod-fullname>_<pod-uid>
-			Names: []string{"/k8s_failed." + strconv.FormatUint(dockertools.HashContainer(&containers[1]), 16) + "_foo_new_12345678_0"},
+			Names: []string{"/k8s_failed." + strconv.FormatUint(kubecontainer.HashContainer(&containers[1]), 16) + "_foo_new_12345678_0"},
 			ID:    "5678",
 		},
 	}
@@ -4037,12 +4042,12 @@ func TestGetPodStatusWithLastTermination(t *testing.T) {
 	exitedAPIContainers := []docker.APIContainers{
 		{
 			// format is // k8s_<container-id>_<pod-fullname>_<pod-uid>
-			Names: []string{"/k8s_succeeded." + strconv.FormatUint(dockertools.HashContainer(&containers[0]), 16) + "_foo_new_12345678_0"},
+			Names: []string{"/k8s_succeeded." + strconv.FormatUint(kubecontainer.HashContainer(&containers[0]), 16) + "_foo_new_12345678_0"},
 			ID:    "1234",
 		},
 		{
 			// format is // k8s_<container-id>_<pod-fullname>_<pod-uid>
-			Names: []string{"/k8s_failed." + strconv.FormatUint(dockertools.HashContainer(&containers[1]), 16) + "_foo_new_12345678_0"},
+			Names: []string{"/k8s_failed." + strconv.FormatUint(kubecontainer.HashContainer(&containers[1]), 16) + "_foo_new_12345678_0"},
 			ID:    "5678",
 		},
 	}
@@ -4319,7 +4324,7 @@ func TestGetRestartCount(t *testing.T) {
 	}
 
 	// format is // k8s_<container-id>_<pod-fullname>_<pod-uid>
-	names := []string{"/k8s_bar." + strconv.FormatUint(dockertools.HashContainer(&containers[0]), 16) + "_foo_new_12345678_0"}
+	names := []string{"/k8s_bar." + strconv.FormatUint(kubecontainer.HashContainer(&containers[0]), 16) + "_foo_new_12345678_0"}
 	currTime := time.Now()
 	containerMap := map[string]*docker.Container{
 		"1234": {
@@ -4399,6 +4404,61 @@ func TestFilterOutTerminatedPods(t *testing.T) {
 	actual := kubelet.filterOutTerminatedPods(pods)
 	if !reflect.DeepEqual(expected, actual) {
 		t.Errorf("expected %#v, got %#v", expected, actual)
+	}
+}
+
+func TestRegisterExistingNodeWithApiserver(t *testing.T) {
+	testKubelet := newTestKubelet(t)
+	kubelet := testKubelet.kubelet
+	kubeClient := testKubelet.fakeKubeClient
+	kubeClient.ReactFn = func(action testclient.FakeAction) (runtime.Object, error) {
+		segments := strings.Split(action.Action, "-")
+		if len(segments) < 2 {
+			return nil, fmt.Errorf("unrecognized action, need two or three segments <verb>-<resource> or <verb>-<subresource>-<resource>: %s", action.Action)
+		}
+		verb := segments[0]
+		switch verb {
+		case "create":
+			// Return an error on create.
+			return &api.Node{}, &apierrors.StatusError{
+				ErrStatus: api.Status{Reason: api.StatusReasonAlreadyExists},
+			}
+		case "get":
+			// Return an existing (matching) node on get.
+			return &api.Node{
+				ObjectMeta: api.ObjectMeta{Name: testKubeletHostname},
+				Spec:       api.NodeSpec{ExternalID: testKubeletHostname},
+			}, nil
+		default:
+			return nil, fmt.Errorf("no reaction implemented for %s", action.Action)
+		}
+	}
+	machineInfo := &cadvisorApi.MachineInfo{
+		MachineID:      "123",
+		SystemUUID:     "abc",
+		BootID:         "1b3",
+		NumCores:       2,
+		MemoryCapacity: 1024,
+	}
+	mockCadvisor := testKubelet.fakeCadvisor
+	mockCadvisor.On("MachineInfo").Return(machineInfo, nil)
+	versionInfo := &cadvisorApi.VersionInfo{
+		KernelVersion:      "3.16.0-0.bpo.4-amd64",
+		ContainerOsVersion: "Debian GNU/Linux 7 (wheezy)",
+		DockerVersion:      "1.5.0",
+	}
+	mockCadvisor.On("VersionInfo").Return(versionInfo, nil)
+
+	done := make(chan struct{})
+	go func() {
+		kubelet.registerWithApiserver()
+		done <- struct{}{}
+	}()
+	select {
+	case <-time.After(5 * time.Second):
+		t.Errorf("timed out waiting for registration")
+	case <-done:
+		return
 	}
 }
 

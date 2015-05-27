@@ -29,14 +29,13 @@ import (
 	"strconv"
 
 	"github.com/GoogleCloudPlatform/kubernetes/cmd/kube-controller-manager/app"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/resource"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/clientcmd"
 	clientcmdapi "github.com/GoogleCloudPlatform/kubernetes/pkg/client/clientcmd/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/mesos"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/nodecontroller"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/routecontroller"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/servicecontroller"
 	replicationControllerPkg "github.com/GoogleCloudPlatform/kubernetes/pkg/controller"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/healthz"
@@ -67,10 +66,6 @@ func NewCMServer() *CMServer {
 	}
 	s.CloudProvider = mesos.PluginName
 	s.UseHostPortEndpoints = true
-	s.MinionRegexp = "^.*$"
-	// if the kubelet isn't running on a slave we don't want the resources to show up on the node
-	s.NodeMilliCPU = 0
-	s.NodeMemory = *resource.NewQuantity(0, resource.BinarySI)
 	return s
 }
 
@@ -80,24 +75,7 @@ func (s *CMServer) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&s.UseHostPortEndpoints, "host_port_endpoints", s.UseHostPortEndpoints, "Map service endpoints to hostIP:hostPort instead of podIP:containerPort. Default true.")
 }
 
-func (s *CMServer) verifyMinionFlags() {
-	if !s.SyncNodeList && s.MinionRegexp != "" {
-		glog.Info("--minion_regexp is ignored by --sync_nodes=false")
-	}
-	if s.CloudProvider == "" || s.MinionRegexp == "" {
-		if len(s.MachineList) == 0 {
-			glog.Info("No machines specified!")
-		}
-		return
-	}
-	if len(s.MachineList) != 0 {
-		glog.Info("--machines is overwritten by --minion_regexp")
-	}
-}
-
 func (s *CMServer) Run(_ []string) error {
-	s.verifyMinionFlags()
-
 	if s.Kubeconfig == "" && s.Master == "" {
 		glog.Warningf("Neither --kubeconfig nor --master was specified.  Using default API client.  This might not work.")
 	}
@@ -145,27 +123,24 @@ func (s *CMServer) Run(_ []string) error {
 	}
 	cloud := cloudprovider.InitCloudProvider(s.CloudProvider, s.CloudConfigFile)
 
-	//this is the default "static" capacity reported when there's no kubelet running on a slave
-	nodeResources := &api.NodeResources{
-		Capacity: api.ResourceList{
-			api.ResourceCPU:    *resource.NewMilliQuantity(s.NodeMilliCPU, resource.DecimalSI),
-			api.ResourceMemory: s.NodeMemory,
-		},
-	}
-
-	if s.SyncNodeStatus {
-		glog.Warning("DEPRECATION NOTICE: sync-node-status flag is being deprecated. It has no effect now and it will be removed in a future version.")
-	}
-
-	nodeController := nodecontroller.NewNodeController(cloud, s.MinionRegexp, nil, nodeResources,
-		kubeClient, s.RegisterRetryCount, s.PodEvictionTimeout, util.NewTokenBucketRateLimiter(s.DeletingPodsQps, s.DeletingPodsBurst),
+	nodeController := nodecontroller.NewNodeController(cloud, kubeClient, s.RegisterRetryCount,
+		s.PodEvictionTimeout, util.NewTokenBucketRateLimiter(s.DeletingPodsQps, s.DeletingPodsBurst),
 		s.NodeMonitorGracePeriod, s.NodeStartupGracePeriod, s.NodeMonitorPeriod, (*net.IPNet)(&s.ClusterCIDR), s.AllocateNodeCIDRs)
-	nodeController.Run(s.NodeSyncPeriod, s.SyncNodeList)
+	nodeController.Run(s.NodeSyncPeriod)
 
 	serviceController := servicecontroller.New(cloud, kubeClient, s.ClusterName)
 	if err := serviceController.Run(s.NodeSyncPeriod); err != nil {
 		glog.Errorf("Failed to start service controller: %v", err)
 	}
+
+        if s.AllocateNodeCIDRs {
+                routes, ok := cloud.Routes()
+                if !ok {
+                        glog.Fatal("Cloud provider must support routes if allocate-node-cidrs is set")
+                }
+                routeController := routecontroller.New(routes, kubeClient, s.ClusterName, (*net.IPNet)(&s.ClusterCIDR))
+                routeController.Run(s.NodeSyncPeriod)
+        }
 
 	resourceQuotaManager := resourcequota.NewResourceQuotaManager(kubeClient)
 	resourceQuotaManager.Run(s.ResourceQuotaSyncPeriod)

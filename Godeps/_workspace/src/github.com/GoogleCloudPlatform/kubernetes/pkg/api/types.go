@@ -205,6 +205,8 @@ type VolumeSource struct {
 	Glusterfs *GlusterfsVolumeSource `json:"glusterfs"`
 	// PersistentVolumeClaimVolumeSource represents a reference to a PersistentVolumeClaim in the same namespace
 	PersistentVolumeClaimVolumeSource *PersistentVolumeClaimVolumeSource `json:"persistentVolumeClaim,omitempty"`
+	// RBD represents a Rados Block Device mount on the host that shares a pod's lifetime
+	RBD *RBDVolumeSource `json:"rbd"`
 }
 
 // Similar to VolumeSource but meant for the administrator who creates PVs.
@@ -224,6 +226,8 @@ type PersistentVolumeSource struct {
 	Glusterfs *GlusterfsVolumeSource `json:"glusterfs"`
 	// NFS represents an NFS mount on the host that shares a pod's lifetime
 	NFS *NFSVolumeSource `json:"nfs"`
+	// RBD represents a Rados Block Device mount on the host that shares a pod's lifetime
+	RBD *RBDVolumeSource `json:"rbd"`
 }
 
 type PersistentVolumeClaimVolumeSource struct {
@@ -479,6 +483,30 @@ type GlusterfsVolumeSource struct {
 
 	// Optional: Defaults to false (read/write). ReadOnly here will force
 	// the Glusterfs to be mounted with read-only permissions
+	ReadOnly bool `json:"readOnly,omitempty"`
+}
+
+// RBDVolumeSource represents a Rados Block Device Mount that lasts the lifetime of a pod
+type RBDVolumeSource struct {
+	// Required: CephMonitors is a collection of Ceph monitors
+	CephMonitors []string `json:"monitors"`
+	// Required: RBDImage is the rados image name
+	RBDImage string `json:"image"`
+	// Required: Filesystem type to mount.
+	// Must be a filesystem type supported by the host operating system.
+	// Ex. "ext4", "xfs", "ntfs"
+	// TODO: how do we prevent errors in the filesystem from compromising the machine
+	FSType string `json:"fsType,omitempty"`
+	// Optional: RadosPool is the rados pool name,default is rbd
+	RBDPool string `json:"pool"`
+	// Optional: RBDUser is the rados user name, default is admin
+	RadosUser string `json:"user"`
+	// Optional: Keyring is the path to key ring for RBDUser, default is /etc/ceph/keyring
+	Keyring string `json:"keyring"`
+	// Optional: SecretRef is name of the authentication secret for RBDUser, default is empty.
+	SecretRef *LocalObjectReference `json:"secretRef"`
+	// Optional: Defaults to false (read/write). ReadOnly here will force
+	// the ReadOnly setting in VolumeMounts.
 	ReadOnly bool `json:"readOnly,omitempty"`
 }
 
@@ -831,6 +859,10 @@ type PodSpec struct {
 	// used must be specified.
 	// Optional: Default to false.
 	HostNetwork bool `json:"hostNetwork,omitempty"`
+	// ImagePullSecrets is an optional list of references to secrets in the same namespace to use for pulling any of the images used by this PodSpec.
+	// If specified, these secrets will be passed to individual puller implementations for them to use.  For example,
+	// in the case of docker, only DockerConfig type secrets are honored.
+	ImagePullSecrets []LocalObjectReference `json:"imagePullSecrets,omitempty" description:"list of references to secrets in the same namespace available for pulling the container images"`
 }
 
 // PodStatus represents information about the status of a pod. Status may trail the actual
@@ -979,8 +1011,49 @@ const (
 	ServiceAffinityNone ServiceAffinity = "None"
 )
 
+// Service Type string describes ingress methods for a service
+type ServiceType string
+
+const (
+	// ServiceTypeClusterIP means a service will only be accessible inside the
+	// cluster, via the portal IP.
+	ServiceTypeClusterIP ServiceType = "ClusterIP"
+
+	// ServiceTypeNodePort means a service will be exposed on one port of
+	// every node, in addition to 'ClusterIP' type.
+	ServiceTypeNodePort ServiceType = "NodePort"
+
+	// ServiceTypeLoadBalancer means a service will be exposed via an
+	// external load balancer (if the cloud provider supports it), in addition
+	// to 'NodePort' type.
+	ServiceTypeLoadBalancer ServiceType = "LoadBalancer"
+)
+
 // ServiceStatus represents the current status of a service
-type ServiceStatus struct{}
+type ServiceStatus struct {
+	// LoadBalancer contains the current status of the load-balancer,
+	// if one is present.
+	LoadBalancer LoadBalancerStatus `json:"loadBalancer,omitempty"`
+}
+
+// LoadBalancerStatus represents the status of a load-balancer
+type LoadBalancerStatus struct {
+	// Ingress is a list containing ingress points for the load-balancer;
+	// traffic intended for the service should be sent to these ingress points.
+	Ingress []LoadBalancerIngress `json:"ingress,omitempty" description:"load-balancer ingress points"`
+}
+
+// LoadBalancerIngress represents the status of a load-balancer ingress point:
+// traffic intended for the service should be sent to an ingress point.
+type LoadBalancerIngress struct {
+	// IP is set for load-balancer ingress points that are IP based
+	// (typically GCE or OpenStack load-balancers)
+	IP string `json:"ip,omitempty" description:"IP address of ingress point"`
+
+	// Hostname is set for load-balancer ingress points that are DNS based
+	// (typically AWS load-balancers)
+	Hostname string `json:"hostname,omitempty" description:"hostname of ingress point"`
+}
 
 // ServiceSpec describes the attributes that a user creates on a service
 type ServiceSpec struct {
@@ -999,14 +1072,13 @@ type ServiceSpec struct {
 	// None can be specified for headless services when proxying is not required
 	PortalIP string `json:"portalIP,omitempty"`
 
-	// CreateExternalLoadBalancer indicates whether a load balancer should be created for this service.
-	CreateExternalLoadBalancer bool `json:"createExternalLoadBalancer,omitempty"`
-	// PublicIPs are used by external load balancers, or can be set by
+	// Type determines how the service will be exposed.  Valid options: ClusterIP, NodePort, LoadBalancer
+	Type ServiceType `json:"type,omitempty"`
+
+	// DeprecatedPublicIPs are deprecated and silently ignored.
+	// Old behaviour: PublicIPs are used by external load balancers, or can be set by
 	// users to handle external traffic that arrives at a node.
-	// For load balancers, the publicIP will usually be the IP address of the load balancer,
-	// but some load balancers (notably AWS ELB) use a hostname instead of an IP address.
-	// For hostnames, the user will use a CNAME record (instead of using an A record with the IP)
-	PublicIPs []string `json:"publicIPs,omitempty"`
+	DeprecatedPublicIPs []string `json:"deprecatedPublicIPs,omitempty"`
 
 	// Required: Supports "ClientIP" and "None".  Used to maintain session affinity.
 	SessionAffinity ServiceAffinity `json:"sessionAffinity,omitempty"`
@@ -1032,6 +1104,10 @@ type ServicePort struct {
 	// of v1beta3 the default value is the sames as the Port field (an
 	// identity map).
 	TargetPort util.IntOrString `json:"targetPort"`
+
+	// The port on each node on which this service is exposed.
+	// Default is to auto-allocate a port if the ServiceType of this Service requires one.
+	NodePort int `json:"nodePort" description:"the port on each node on which this service is exposed"`
 }
 
 // Service is a named abstraction of software service (for example, mysql) consisting of local port
@@ -1630,6 +1706,12 @@ type ObjectReference struct {
 	FieldPath string `json:"fieldPath,omitempty"`
 }
 
+// LocalObjectReference contains enough information to let you locate the referenced object inside the same namespace.
+type LocalObjectReference struct {
+	//TODO: Add other useful fields.  apiVersion, kind, uid?
+	Name string
+}
+
 type SerializedReference struct {
 	TypeMeta  `json:",inline"`
 	Reference ObjectReference `json:"reference,omitempty" description:"the reference to an object in the system"`
@@ -1704,6 +1786,10 @@ type ContainerManifest struct {
 	// Required: Set DNS policy.
 	DNSPolicy   DNSPolicy `json:"dnsPolicy"`
 	HostNetwork bool      `json:"hostNetwork,omitempty"`
+	// ImagePullSecrets is an optional list of references to secrets in the same namespace to use for pulling any of the images used by this PodSpec.
+	// If specified, these secrets will be passed to individual puller implementations for them to use.  For example,
+	// in the case of docker, only DockerConfig type secrets are honored.
+	ImagePullSecrets []LocalObjectReference `json:"imagePullSecrets,omitempty" description:"list of references to secrets in the same namespace available for pulling the container images"`
 }
 
 // ContainerManifestList is used to communicate container manifests to kubelet.
